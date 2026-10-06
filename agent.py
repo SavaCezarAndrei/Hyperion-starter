@@ -51,6 +51,11 @@ async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
         if replied:
             return
         yield {"response": prompts.CONFIRM_DROPPED}  # moved on: handle the new message
+    elif confirm.is_bare_answer(text):
+        # A lone "yes"/"no" with nothing pending must never reach the router: it would
+        # read the conversation ("delete X" ... "yes") and plan the change again.
+        yield {"response": prompts.CONFIRM_NOTHING_PENDING}
+        return
 
     progress.report("🧭 Understanding your request...")
     intent = await router.classify(session, text)

@@ -190,8 +190,26 @@ CONFIRM_ASK = (
     "Reply yes to apply it, or no to cancel."
 )
 CONFIRM_CANCELLED = "Cancelled - nothing was changed."
+CONFIRM_NOTHING_PENDING = (
+    "There's nothing waiting for your confirmation right now, so nothing was changed. "
+    "Tell me what you'd like to do."
+)
 CONFIRM_EXPIRED = "That confirmation is too old, so I didn't apply it. Please ask again."
 CONFIRM_DROPPED = "(I dropped the change that was waiting for your confirmation.)\n\n"
+
+LOCAL_CHECK_ONLY = (
+    "The IDE's validator was unreachable, so I checked it against the HYPER-AI "
+    "specification myself - ask me to validate it once the IDE is back."
+)
+
+UNSAFE_PATH = (
+    "I can't use '{path}': files must stay inside your workspace, so absolute paths "
+    "and '..' are not allowed. Nothing was changed. Use a path like demo/app.yaml."
+)
+WHICH_FILE = (
+    "Which file do you mean? Please name it - I won't guess which file to change. "
+    "Files in your workspace: {files}"
+)
 
 ACTION_NOTHING_TO_DO = (
     "I'm not sure what to change in your workspace. Could you say which file or "

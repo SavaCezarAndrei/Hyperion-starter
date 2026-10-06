@@ -214,8 +214,10 @@ async def write_file(task: Task, original: str | None = None) -> tuple[str, list
 
 
 def written(verb: str, path: str, kind: str, problems: list[str]) -> str:
-    if not problems:
+    if not problems and workspace.backend_available():
         return f"✅ {verb} {path} - a {kind} application profile that passes HYPER-AI validation."
+    if not problems:  # only the local check ran: say so, don't claim the IDE's validation
+        return f"✅ {verb} {path} - a {kind} application profile. {prompts.LOCAL_CHECK_ONLY}"
     listed = "\n".join(f"  - {p}" for p in problems)
     return (
         f"⚠️ {verb} {path}, but I could not fix every problem - please check these:\n{listed}"

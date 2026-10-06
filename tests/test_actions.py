@@ -49,7 +49,9 @@ def test_nginx_deployment_yaml(folder):
     assert len(files) == 1 and files[0]["path"].startswith(folder + "/")
     doc = yaml.safe_load(files[0]["content"])
     assert dsl.kind_of(doc) == "native"
-    assert doc["applicationProfile"]["specs"]["runtime"]["containerImage"]["uri"].startswith("nginx")
+    # "nginx" or its fully qualified form "docker.io/library/nginx" - the same image.
+    uri = doc["applicationProfile"]["specs"]["runtime"]["containerImage"]["uri"]
+    assert uri.split("/")[-1].split(":")[0] == "nginx"
     assert "passes HYPER-AI validation" in reply
     assert ide.read(files[0]["path"])  # the file exists in the workspace
 
@@ -99,6 +101,30 @@ def test_read_and_validate_a_file(folder):
 # --- deleting and edge cases ------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["create a file ../../etc/passwd.yaml", "create a file C:/temp/x.yaml"],  # manual 10.3, 10.4
+)
+def test_unsafe_paths_are_refused_not_repaired(text):
+    reply, actions = act(str(uuid.uuid4()), text)
+    assert actions == []
+    assert "not allowed" in reply and "Nothing was changed" in reply
+
+
+def test_unnamed_file_is_not_guessed(folder):
+    # Manual test 10.6: another session created a file; a fresh session must ask
+    # which file to change instead of picking it.
+    make_file(str(uuid.uuid4()), folder)
+    reply, actions = act(str(uuid.uuid4()), "change the port to 9090")
+    assert actions == []
+    assert "Which file do you mean?" in reply and "Reply yes" not in reply
+
+
+def test_bare_yes_with_nothing_pending():
+    reply, actions = act(str(uuid.uuid4()), "yes")
+    assert actions == [] and "nothing waiting" in reply
+
+
 def test_delete_missing_file_sends_no_action():
     reply, actions = act(str(uuid.uuid4()), "delete the file does-not-exist-123.yaml")
     assert actions == []
@@ -134,8 +160,10 @@ def test_no_cancels_a_delete(folder):
     reply, actions = act(user, "no")
     assert actions == [] and "nothing was changed" in reply
     assert ide.read(path)  # still there
-    _, actions = act(user, "yes")  # a late yes must not delete anything
-    assert not any(a["action"] == "delete_file" for a in actions)
+    # Manual test 9.7: a late "yes" must not delete anything - nor ask again.
+    reply, actions = act(user, "yes")
+    assert actions == [] and "Reply yes" not in reply
+    assert "nothing waiting" in reply
     assert ide.read(path)
 
 
@@ -201,6 +229,50 @@ def test_change_summary():
 def test_clean_path_rejects_unsafe_paths(bad):
     with pytest.raises(workspace.PathError):
         workspace.clean_path(bad, is_file=True)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "create a file ../../etc/passwd.yaml",
+        "create a file C:/temp/x.yaml",
+        r"create a file C:\temp\x.yaml",
+        "put it in ~/secret.yaml",
+        "write the profile to /etc/hyperion/app.yaml",
+        "delete the folder demo/../..",
+        "create a folder ..",
+    ],
+)
+def test_unsafe_paths_in_the_users_words_are_found(text):
+    assert workspace.unsafe_paths(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "create demo/nginx.yaml",
+        "What is HYPER-AI and/or the IDE?",
+        "use port 8080/TCP",
+        "Create a deployment YAML for a service using the nginx Docker image",
+    ],
+)
+def test_normal_requests_have_no_unsafe_paths(text):
+    assert workspace.unsafe_paths(text) == []
+
+
+@pytest.mark.parametrize(
+    "path, text, named",
+    [
+        ("nginx-deployment.yaml", "change the port to 9090", False),
+        ("nginx-deployment.yaml", "change the deployment port", False),  # too generic
+        ("nginx-deployment.yaml", "change the port of the nginx file", True),
+        ("demo/redis.yaml", "delete demo/redis.yaml", True),
+        ("demo/redis.yaml", "delete redis", True),
+        ("app.yaml", "is app.yaml valid?", True),
+    ],
+)
+def test_mentioned(path, text, named):
+    assert workspace.mentioned(path, text) is named
 
 
 def test_clean_path_adds_yaml_extension():

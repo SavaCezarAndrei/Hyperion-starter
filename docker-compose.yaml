@@ -41,8 +41,11 @@ services:
     read_only: true
     tmpfs: [/tmp]
     security_opt: ["no-new-privileges:true"]
+    # Run as the image's redis user (uid 999) from the start, never as root. As root
+    # with capabilities dropped, the entrypoint's chown of /data fails once Redis has
+    # written its data, and the container crash-loops on every restart.
+    user: "999:999"
     cap_drop: [ALL]
-    cap_add: [SETGID, SETUID]
     restart: unless-stopped
 
 networks:

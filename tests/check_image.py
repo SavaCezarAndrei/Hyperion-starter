@@ -110,6 +110,8 @@ def no_backend():
     check("questions still work", "Sources (HYPER-AI documentation)" in reply, reply)
     reply, actions = chat("Create a deployment YAML for a service using the nginx Docker image")
     check("file still created (local DSL check)", any(a["action"] == "create_file" for a in actions), reply)
+    check("honest: doesn't claim the IDE's validation",
+          "passes HYPER-AI validation" not in reply and "validator was unreachable" in reply, reply)
     reply, actions = chat("delete app.yaml")
     check("delete without workspace view: no action", actions == [], reply)
 

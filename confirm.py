@@ -37,6 +37,12 @@ def answer(text: str) -> str | None:
     return None
 
 
+def is_bare_answer(text: str) -> bool:
+    """The whole message is just a yes or a no ("yes", "No!", "go ahead")."""
+    phrase = " ".join(re.sub(r"[^\w' ]", " ", text.lower()).split())
+    return phrase in YES or phrase in NO
+
+
 def _flatten(node: object, prefix: str = "") -> dict[str, object]:
     if isinstance(node, dict):
         out = {}

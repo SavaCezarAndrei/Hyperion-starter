@@ -124,7 +124,29 @@ async def plan_actions(
     return tasks[:MAX_TASKS]
 
 
+TARGETS_EXISTING = ("edit_file", "delete_file", "read_file", "validate_file", "delete_folder")
+
+
+def guesses_target(task: workers.Task, text: str, session: memory.Session) -> bool:
+    """A change to an existing file or folder must target one the user named, or the
+    file this conversation is working on ("it") - never one the planner picked."""
+    if task.op not in TARGETS_EXISTING:
+        return False
+    name = task.path.strip()
+    if name.lower() in workers.LAST_FILE:
+        return False  # "it": the worker uses session.last_file, or asks
+    if session.last_file and name.strip("/") in (
+        session.last_file, session.last_file.rsplit("/", 1)[-1]
+    ):
+        return False
+    return not workspace.mentioned(name, text)
+
+
 async def run_actions(session: memory.Session, text: str) -> AsyncIterator[dict]:
+    if unsafe := workspace.unsafe_paths(text):
+        # Checked on the user's words: the planner would "repair" these paths.
+        yield {"response": prompts.UNSAFE_PATH.format(path=unsafe[0])}
+        return
     progress.report("🗂️ Looking at your workspace...")
     try:
         entries = await workspace.list_entries()
@@ -135,6 +157,12 @@ async def run_actions(session: memory.Session, text: str) -> AsyncIterator[dict]
     tasks = await plan_actions(session, text, entries)
     if not tasks:
         yield {"response": prompts.ACTION_NOTHING_TO_DO}
+        return
+    if guessed := [t for t in tasks if guesses_target(t, text, session)]:
+        # The planner picked an existing file the user never named: ask instead.
+        log.info("planner guessed targets %s for %r", [t.path for t in guessed], text)
+        listed = ", ".join(sorted(entries.files)[:MAX_LISTED_FILES]) or "(no files yet)"
+        yield {"response": prompts.WHICH_FILE.format(files=listed)}
         return
     progress.report(
         "📋 Plan: "
