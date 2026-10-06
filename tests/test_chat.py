@@ -86,6 +86,13 @@ def test_answer_comes_from_the_docs():
     assert "application controller" in text.lower()
 
 
+def test_compound_question_gets_one_answer_per_part():
+    text, _ = send(new_user(), "What is a DeviceNode and who coordinates the HYPER-AI project?")
+    assert "1) " in text and "2) " in text
+    assert "CERTH" in text
+    assert "🔴" not in text  # both parts are in the documentation
+
+
 def test_marks_web_answers_when_docs_lack_it():
     # On-topic, but no document covers it: web answer, clearly marked red.
     text, _ = send(new_user(), "What was the total budget of the HYPER-AI project in euros?")
@@ -93,7 +100,8 @@ def test_marks_web_answers_when_docs_lack_it():
     assert "Sources (HYPER-AI documentation)" not in text
     if "returned no results" in text:  # free search engines are rate-limited at times
         pytest.skip("web search unavailable right now")
-    assert "🔴 NOT FROM THE HYPER-AI DOCUMENTATION 🔴" in text
+    # Either a web answer or "the web doesn't answer it either" - both marked red.
+    assert "🔴 NOT FROM THE HYPER-AI DOCUMENTATION 🔴" in text or "🔴 I also searched the web" in text
     assert "http" in text  # web sources listed
 
 

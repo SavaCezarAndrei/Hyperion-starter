@@ -2,12 +2,12 @@
 
 Hybrid retrieval: vector search (nomic-embed-text) finds paraphrases, BM25 finds
 exact terms like "DeviceNode" or "self-CHOP"; the two rankings are merged with
-reciprocal rank fusion. The answer is generated only from the retrieved chunks.
+reciprocal rank fusion. Answers are drafted only from the retrieved chunks; the
+question worker (workers.py) verifies them and falls back to the web.
 """
 
 import logging
 import re
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 from langchain_core.callbacks import (
@@ -23,15 +23,15 @@ from rank_bm25 import BM25Okapi
 
 import memory
 import prompts
-import web
 from llm import embeddings, llm
 
 log = logging.getLogger("hyperion.rag")
 
 INDEX = Path(__file__).parent / "data" / "index.json"
 
-TOP_K = 5  # chunks given to the model
-CANDIDATES = 10  # per retriever, before fusion
+TOP_K = 6  # chunks given to the model (~1800 tokens)
+CANDIDATES = 15  # per retriever, before fusion
+PER_SOURCE = 2  # max chunks from one document, so comparisons see both sides
 RRF_K = 60  # standard reciprocal-rank-fusion constant
 # Below this cosine similarity the question is not covered by the documents
 MIN_SIMILARITY = 0.58  # measured: documented questions 0.60-0.86, off-topic 0.47-0.61
@@ -48,11 +48,15 @@ STOPWORDS = set(
 
 
 def stem(word: str) -> str:
-    """Light plural stemming so "controllers" matches "Controller"."""
+    """Light suffix stripping, applied to both questions and chunks:
+    controllers/Controller -> controll, coordinates/coordinator -> coordinat."""
     if len(word) > 4 and word.endswith("ies"):
-        return word[:-3] + "y"
-    if len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
-        return word[:-1]
+        word = word[:-3] + "y"
+    elif len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        word = word[:-1]
+    for suffix in ("ing", "ed", "or", "er", "e"):
+        if word.endswith(suffix) and len(word) - len(suffix) >= 4:
+            return word[: -len(suffix)]
     return word
 
 
@@ -91,7 +95,14 @@ class HybridRetriever(BaseRetriever):
             doc_id = self.documents[i].id
             scores[doc_id] = scores.get(doc_id, 0) + 1 / (RRF_K + rank)
         by_id = {d.id: d for d in self.documents}
-        top = sorted(scores, key=lambda doc_id: -scores[doc_id])[: self.k]
+        top, taken = [], {}
+        for doc_id in sorted(scores, key=lambda doc_id: -scores[doc_id]):
+            source = by_id[doc_id].metadata["source"]
+            if taken.get(source, 0) < PER_SOURCE:
+                top.append(doc_id)
+                taken[source] = taken.get(source, 0) + 1
+            if len(top) == self.k:
+                break
         return [
             Document(
                 id=doc_id,
@@ -129,10 +140,20 @@ answer_prompt = ChatPromptTemplate.from_messages(
     [
         ("system", prompts.SYSTEM + "\n\n" + prompts.RAG_INSTRUCTIONS),
         MessagesPlaceholder("history"),
-        ("human", "Context from the HYPER-AI documents:\n\n{context}\n\nQuestion: {question}"),
+        (
+            "human",
+            "Context from the HYPER-AI documents:\n\n{context}\n\nQuestion: {question}{feedback}",
+        ),
     ]
 )
 answer_chain = answer_prompt | llm | StrOutputParser()
+
+# Backup for when the model explains instead of answering with the NOT_COVERED marker.
+NOT_COVERED_PHRASES = re.compile(
+    r"(do not|don't|does not|doesn't) (cover|mention|contain)|not (mentioned|covered|"
+    r"provided|specified|included) in|no information",
+    re.I,
+)
 
 
 def search_query(session: memory.Session, text: str) -> str:
@@ -153,45 +174,27 @@ async def retrieve(session: memory.Session, text: str) -> list[Document]:
     return docs if best >= MIN_SIMILARITY else []
 
 
-# Characters held back before streaming, so the NOT_COVERED marker never reaches the user.
-HOLD = 20
-# Backup for when the model explains instead of answering with the marker.
-NOT_COVERED_PHRASES = re.compile(
-    r"(do not|don't|does not|doesn't) (cover|mention|contain)|not (mentioned|covered|"
-    r"provided|specified|included) in|no information",
-    re.I,
-)
+def evidence(docs: list[Document]) -> str:
+    return "\n\n---\n\n".join(d.page_content for d in docs)
 
 
-def cite(docs: list[Document]) -> str:
-    sources = list(dict.fromkeys(d.metadata["source"] for d in docs))
-    return "\n\nSources (HYPER-AI documentation): " + "; ".join(sources[:3])
+def sources(docs: list[Document]) -> list[str]:
+    return list(dict.fromkeys(d.metadata["source"] for d in docs))[:3]
 
 
-async def answer(session: memory.Session, text: str) -> AsyncIterator[dict]:
-    query = search_query(session, text)
-    docs = await retrieve(session, text)
-    covered = False
-    if docs:
-        context = "\n\n---\n\n".join(d.page_content for d in docs)
-        written = ""
-        async for chunk in answer_chain.astream(
-            {"context": context, "question": text, "history": memory.history(session)}
-        ):
-            written += chunk
-            if prompts.NOT_COVERED in written:
-                break
-            if len(written) >= HOLD:
-                yield {"response": written if len(written) - len(chunk) < HOLD else chunk}
-        else:
-            if written and len(written) < HOLD:  # short answer, never released above
-                yield {"response": written}
-            covered = bool(written.strip()) and not NOT_COVERED_PHRASES.search(written)
-        if covered:
-            yield {"response": cite(docs)}
-            return
-    if not docs or prompts.NOT_COVERED in written:
-        yield {"response": prompts.NOT_IN_DOCS}
-    # The documents fall short: fall back to the web, clearly marked.
-    async for event in web.answer(query, text):
-        yield event
+def not_covered(answer: str) -> bool:
+    return prompts.NOT_COVERED in answer or bool(NOT_COVERED_PHRASES.search(answer))
+
+
+async def draft(
+    session: memory.Session, question: str, context: str, feedback: str = ""
+) -> str:
+    """One answer drafted only from `context`; `feedback` carries the verifier's objections."""
+    return await answer_chain.ainvoke(
+        {
+            "context": context,
+            "question": question,
+            "feedback": f"\n\n{feedback}" if feedback else "",
+            "history": memory.history(session),
+        }
+    )

@@ -10,8 +10,8 @@ from collections.abc import AsyncIterator
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import memory
+import orchestrator
 import prompts
-import rag
 import router
 from llm import llm
 
@@ -35,7 +35,7 @@ async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
         async for event in chat(session, text):
             yield event
     elif intent == "question":
-        async for event in rag.answer(session, text):
+        async for event in orchestrator.answer_questions(session, text):
             yield event
     else:
         # TODO Phase 5: actions.run(session, text)

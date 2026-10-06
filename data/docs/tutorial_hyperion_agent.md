@@ -8,9 +8,9 @@ Every time the user types in the Hyperion panel, the IDE sends your agent a
 request:
 
 ```
-{ 
-    "user_id": "3f2a9c11-...", 
-    "text": "Please create a folder for me" 
+{
+    "user_id": "3f2a9c11-...",
+    "text": "Please create a folder for me"
 }
 
 ```

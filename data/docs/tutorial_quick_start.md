@@ -32,9 +32,13 @@ When you open the IDE you are redirected to the HyperAI sign-in page. Enter your
 
 If you don't have an account yet, click Register and create one first.
 
+- HyperAI sign-in page with email and password fields and a Register link
+
 ## Step 2 — Create a working directory for your app
 
 You can create a working directory for organizing your app, or group of apps. This is done through the Workspace Explorer by clicking Create Folder.
+
+- Explorer panel with the New Folder button highlighted
 
 ## Step 3 — Create your Application Profile .yaml
 
@@ -42,11 +46,17 @@ After creating the working directory, the application profile .yaml document mus
 
 To build the profile, consult the DSL Specification: Native Apps for native applications, or Device Apps for applications meant to run on a device. You can also find ready-to-use examples in the Cookbook & Examples. This is where you reference the container image you pushed in Step 0.
 
+- Explorer panel with the New File button highlighted
+
 ## Step 4 — Deployment
 
 When you are ready, click the Deploy button. Before this step, make sure each profile has been saved.
 
+- IDE header with the Deploy button highlighted
+
 In the popup window, select the workflow you want to deploy and click Deploy. Multiple profiles can be deployed at the same time.
+
+- Deploy dialog with the folder selected and profiles checked for deployment
 
 You will be asked to manually change the workflow name — if you don't want to, just skip it by clicking OK.
 
@@ -54,8 +64,12 @@ You will be asked to manually change the workflow name — if you don't want to,
 
 If you haven't received an error message, click the Dashboard. In the list of deployments, find the one you just deployed and press Start.
 
+- Dashboard deployments list with the Start button
+
 This may take some time until the workflow status is Running.
 
 ## Tips
 
 If you want to see live analytics of your workflow, click the Metrics button.
+
+- Live analytics view of a running workflow

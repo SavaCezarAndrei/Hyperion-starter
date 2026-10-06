@@ -1,19 +1,23 @@
 """Web fallback for on-topic questions the HYPER-AI documents do not cover.
 
 Only reached after the router accepted the question, so off-topic requests are
-still refused. The answer is built from search snippets only and is always
-labelled as not coming from the documentation.
+still refused. Evidence = search snippets + the most relevant paragraphs of the
+top result pages. Answers are drafted only from that evidence, verified by the
+question worker, and always labelled as not coming from the documentation.
 """
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
+import httpx
 from ddgs import DDGS
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 
 import prompts
+import rag
+from html_text import html_to_markdown
 from llm import llm
 
 log = logging.getLogger("hyperion.web")
@@ -22,9 +26,26 @@ log = logging.getLogger("hyperion.web")
 # blocks most automated queries but is tried first.
 BACKENDS = ("google", "duckduckgo", "bing", "auto")
 MAX_RESULTS = 5
-TIMEOUT = 10  # seconds per backend
+SEARCH_TIMEOUT = 10  # seconds per backend
+PAGES_TO_READ = 2  # full pages fetched from the top results
+PAGE_TIMEOUT = 8
+PASSAGE_CHARS = 1500  # relevant text kept per page (the model has 8192 tokens)
 # "Hyper AI" is also an unrelated product name; anchor searches to the EU project.
 PROJECT_HINT = "EU Horizon project computing continuum"
+
+web_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", prompts.SYSTEM + "\n\n" + prompts.WEB_INSTRUCTIONS),
+        ("human", "Web search results:\n\n{evidence}\n\nQuestion: {question}{feedback}"),
+    ]
+)
+web_chain = web_prompt | llm | StrOutputParser()
+
+
+@dataclass
+class WebEvidence:
+    text: str = ""  # numbered results, given to the writer and the verifier
+    links: list[str] = field(default_factory=list)
 
 
 def web_query(question: str) -> str:
@@ -33,19 +54,13 @@ def web_query(question: str) -> str:
         query += f" {PROJECT_HINT}"
     return query
 
-web_prompt = ChatPromptTemplate.from_messages(
-    [
-        ("system", prompts.SYSTEM + "\n\n" + prompts.WEB_INSTRUCTIONS),
-        ("human", "Web search results:\n\n{results}\n\nQuestion: {question}"),
-    ]
-)
-web_chain = web_prompt | llm | StrOutputParser()
-
 
 def _search(query: str) -> list[dict]:
     for backend in BACKENDS:
         try:
-            results = DDGS(timeout=TIMEOUT).text(query, max_results=MAX_RESULTS, backend=backend)
+            results = DDGS(timeout=SEARCH_TIMEOUT).text(
+                query, max_results=MAX_RESULTS, backend=backend
+            )
             if results:
                 log.info("web search via %s: %d results for %r", backend, len(results), query)
                 return results
@@ -54,21 +69,55 @@ def _search(query: str) -> list[dict]:
     return []
 
 
-async def search(query: str) -> list[dict]:
-    return await asyncio.to_thread(_search, query)
+def relevant_passages(page_text: str, question: str) -> str:
+    """The paragraphs of a page that share the most words with the question."""
+    wanted = set(rag.tokenize(question))
+    paragraphs = [p.strip() for p in page_text.split("\n\n") if len(p.strip()) > 40]
+    ranked = sorted(paragraphs, key=lambda p: -len(wanted & set(rag.tokenize(p))))
+    kept, size = [], 0
+    for p in ranked:
+        if size + len(p) > PASSAGE_CHARS:
+            break
+        kept.append(p)
+        size += len(p)
+    return "\n".join(kept)
 
 
-async def answer(query: str, question: str) -> AsyncIterator[dict]:
-    """Stream a red-marked answer from the web, or nothing if the search finds nothing."""
-    results = await search(web_query(query))
+async def read_page(client: httpx.AsyncClient, url: str, question: str) -> str:
+    try:
+        response = await client.get(url)
+        if "html" not in response.headers.get("content-type", ""):
+            return ""
+        return relevant_passages(html_to_markdown(response.text, "body"), question)
+    except Exception as exc:
+        log.info("could not read %s: %s", url, exc)
+        return ""
+
+
+async def gather(question: str) -> WebEvidence:
+    results = await asyncio.to_thread(_search, web_query(question))
     if not results:
-        yield {"response": prompts.WEB_UNAVAILABLE}
-        return
-    snippets = "\n\n".join(
-        f"[{i}] {r['title']}\n{r['href']}\n{r['body']}" for i, r in enumerate(results, 1)
+        return WebEvidence()
+    async with httpx.AsyncClient(
+        timeout=PAGE_TIMEOUT, follow_redirects=True, headers={"User-Agent": "Mozilla/5.0"}
+    ) as client:
+        pages = await asyncio.gather(
+            *(read_page(client, r["href"], question) for r in results[:PAGES_TO_READ])
+        )
+    blocks = []
+    for i, r in enumerate(results, 1):
+        block = f"[{i}] {r['title']}\n{r['href']}\n{r['body']}"
+        if i <= len(pages) and pages[i - 1]:
+            block += f"\nFrom the page:\n{pages[i - 1]}"
+        blocks.append(block)
+    return WebEvidence("\n\n".join(blocks), [r["href"] for r in results[:3]])
+
+
+async def draft(question: str, evidence: str, feedback: str = "") -> str:
+    return await web_chain.ainvoke(
+        {
+            "evidence": evidence,
+            "question": question,
+            "feedback": f"\n\n{feedback}" if feedback else "",
+        }
     )
-    yield {"response": prompts.WEB_HEADER}
-    async for chunk in web_chain.astream({"results": snippets, "question": question}):
-        yield {"response": chunk}
-    links = "\n".join(f"  {r['href']}" for r in results[:3])
-    yield {"response": f"\n\n🔴 Web sources (not verified by HYPER-AI):\n{links}"}

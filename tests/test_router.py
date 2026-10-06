@@ -49,8 +49,7 @@ CASES = [
 
 MIN_ACCURACY = 0.9
 
-# One loop for the whole module: the LLM client is bound to the loop it first ran on.
-loop = asyncio.new_event_loop()
+from conftest import loop  # the one shared event loop, see conftest.py
 
 
 def test_router_accuracy():

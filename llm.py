@@ -12,6 +12,9 @@ load_dotenv()
 API_KEY = os.environ.get("API_KEY", "")
 BASE_URL = "https://legion1.di.uoa.gr/v1"
 MODEL = "llama3.1"  # Llama 3.1 8B, 8192-token context
+# The shared server sometimes stalls for 30 s+: cut a stalled call and retry it once.
+TIMEOUT = 30
+MAX_RETRIES = 1
 
 # Free-text answers (streamed to the user).
 llm = ChatOpenAI(
@@ -20,6 +23,8 @@ llm = ChatOpenAI(
     api_key=API_KEY,
     max_completion_tokens=2048,
     temperature=0.2,
+    timeout=TIMEOUT,
+    max_retries=MAX_RETRIES,
 )
 
 # Structured output for the router and the planner: deterministic JSON.
@@ -29,6 +34,8 @@ llm_json = ChatOpenAI(
     api_key=API_KEY,
     max_completion_tokens=512,
     temperature=0,
+    timeout=TIMEOUT,
+    max_retries=MAX_RETRIES,
 ).bind(response_format={"type": "json_object"})
 
 

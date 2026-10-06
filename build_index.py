@@ -58,10 +58,21 @@ def load_docx(path: Path) -> list[Document]:
     return [Document(text, metadata={"source": docx_title(path), "section": ""})]
 
 
+SITES = {"tutorial": "IDE Tutorial", "website": "HYPER-AI website"}
+
+
+def markdown_source(path: Path, text: str) -> str:
+    """tutorial_cookbook.md -> 'IDE Tutorial: Cookbook & Examples' (its # title),
+    website_use_case_healthcare.md -> 'HYPER-AI website: Use Case Healthcare'."""
+    site, _, page = path.stem.partition("_")
+    title = re.search(r"^# (.+)$", text, re.M)
+    name = title.group(1).strip() if title else page.replace("_", " ").title()
+    return f"{SITES.get(site, site)}: {name}"
+
+
 def load_markdown(path: Path) -> list[Document]:
     text = path.read_text(encoding="utf-8")
-    title = re.search(r"^# (.+)$", text, re.M)
-    source = f"IDE Tutorial: {title.group(1).strip() if title else path.stem}"
+    source = markdown_source(path, text)
     sections = MarkdownHeaderTextSplitter(HEADERS, strip_headers=False).split_text(text)
     return [
         Document(

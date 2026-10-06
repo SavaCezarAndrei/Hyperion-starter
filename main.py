@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,6 +11,11 @@ import agent
 import memory
 import prompts
 
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+for noisy in ("httpx", "openai", "primp", "ddgs"):
+    logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("hyperion")
 
 app = FastAPI(title="Hyperion Agent")
@@ -32,6 +38,7 @@ def sse(event: dict) -> str:
 
 
 async def generate_reply(request: ChatRequest):
+    started = time.perf_counter()
     session = await memory.get(request.user_id)
     reply: list[str] = []
     try:
@@ -46,6 +53,7 @@ async def generate_reply(request: ChatRequest):
         yield sse({"response": message})
     memory.add_turn(session, request.text, "".join(reply))
     await memory.save(session)
+    log.info("replied in %.1fs to %r", time.perf_counter() - started, request.text[:80])
     yield "data: [DONE]\n\n"
 
 
