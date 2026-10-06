@@ -20,5 +20,11 @@ llm = ChatOpenAI(
     temperature=0.2,
 )
 
-# Structured output for the router and the planner: the model must return JSON.
-llm_json = llm.bind(response_format={"type": "json_object"})
+# Structured output for the router and the planner: deterministic JSON.
+llm_json = ChatOpenAI(
+    model=MODEL,
+    base_url=BASE_URL,
+    api_key=API_KEY,
+    max_completion_tokens=512,
+    temperature=0,
+).bind(response_format={"type": "json_object"})

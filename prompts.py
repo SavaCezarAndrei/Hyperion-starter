@@ -12,4 +12,9 @@ REFUSAL = (
     "its IDE and your application files."
 )
 
-ERROR = "Sorry, something went wrong on my side: {error}"
+ACTIONS_NOT_READY = (
+    "I understood that you want me to change your workspace, "
+    "but file actions are not available yet."
+)
+
+ERROR ="Sorry, something went wrong on my side: {error}"

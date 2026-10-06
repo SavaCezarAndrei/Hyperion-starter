@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 import memory
 import prompts
+import router
 from llm import llm
 
 Event = dict
@@ -25,10 +26,20 @@ async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
         return
 
     # TODO Phase 6: if session.pending -> confirm.resolve(session, text)
-    # TODO Phase 3: intent = await router.classify(session, text), then dispatch to
-    #               refusal / chitchat / rag.answer / actions.run
-    async for event in chat(session, text):
-        yield event
+
+    intent = await router.classify(session, text)
+    if intent == "off_topic":
+        yield {"response": prompts.REFUSAL}
+    elif intent == "chitchat":
+        async for event in chat(session, text):
+            yield event
+    elif intent == "question":
+        # TODO Phase 4: rag.answer(session, text)
+        async for event in chat(session, text):
+            yield event
+    else:
+        # TODO Phase 5: actions.run(session, text)
+        yield {"response": prompts.ACTIONS_NOT_READY}
 
 
 async def chat(session: memory.Session, text: str) -> AsyncIterator[Event]:

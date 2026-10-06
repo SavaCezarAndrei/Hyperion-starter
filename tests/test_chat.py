@@ -52,11 +52,20 @@ def test_sessions_are_separate():
 # --- Phase 3: guardrails -----------------------------------------------------
 
 
-@todo
 def test_rejects_off_topic():
     text, actions = send(new_user(), "What is the weather today?")
     assert "only help with HYPER-AI" in text
     assert actions == []
+
+
+def test_chitchat_is_not_refused():
+    text, _ = send(new_user(), "what is your name?")
+    assert "only help with HYPER-AI" not in text
+
+
+def test_valid_request_is_not_refused():
+    text, _ = send(new_user(), "Create a deployment YAML for nginx")
+    assert "only help with HYPER-AI" not in text
 
 
 # --- Phase 4: RAG ------------------------------------------------------------

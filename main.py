@@ -32,7 +32,7 @@ def sse(event: dict) -> str:
 
 
 async def generate_reply(request: ChatRequest):
-    session = memory.get(request.user_id)
+    session = await memory.get(request.user_id)
     reply: list[str] = []
     try:
         async for event in agent.handle(session, request.text):
@@ -45,6 +45,7 @@ async def generate_reply(request: ChatRequest):
         reply.append(message)
         yield sse({"response": message})
     memory.add_turn(session, request.text, "".join(reply))
+    await memory.save(session)
     yield "data: [DONE]\n\n"
 
 
