@@ -1,25 +1,16 @@
 import json
-import os
+import logging
 
-from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from langchain_openai import ChatOpenAI
 from pydantic import BaseModel
 
-load_dotenv()
+import agent
+import memory
+import prompts
 
-API_KEY = os.environ.get("API_KEY", "")
-BASE_URL = "https://legion1.di.uoa.gr/v1"
-MODEL = "llama3.1"
-
-llm = ChatOpenAI(
-    model=MODEL,
-    base_url=BASE_URL,
-    api_key=API_KEY,
-    max_completion_tokens=2048,
-)
+log = logging.getLogger("hyperion")
 
 app = FastAPI(title="Hyperion Agent")
 
@@ -36,10 +27,24 @@ class ChatRequest(BaseModel):
     text: str  # the text the user typed in the chat
 
 
+def sse(event: dict) -> str:
+    return f"data: {json.dumps(event)}\n\n"
+
+
 async def generate_reply(request: ChatRequest):
-    async for chunk in llm.astream(request.text):
-        if chunk.text:
-            yield f"data: {json.dumps({'response': chunk.text})}\n\n"
+    session = memory.get(request.user_id)
+    reply: list[str] = []
+    try:
+        async for event in agent.handle(session, request.text):
+            if "response" in event:
+                reply.append(event["response"])
+            yield sse(event)
+    except Exception as exc:  # never break the stream halfway
+        log.exception("chat failed")
+        message = prompts.ERROR.format(error=exc)
+        reply.append(message)
+        yield sse({"response": message})
+    memory.add_turn(session, request.text, "".join(reply))
     yield "data: [DONE]\n\n"
 
 
