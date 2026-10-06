@@ -1,7 +1,9 @@
+import asyncio
 import json
 import logging
 import time
 
+import openai
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -9,7 +11,10 @@ from pydantic import BaseModel
 
 import agent
 import memory
+import progress
 import prompts
+import rag
+from llm import API_KEY, is_fatal
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -17,6 +22,15 @@ logging.basicConfig(
 for noisy in ("httpx", "openai", "primp", "ddgs"):
     logging.getLogger(noisy).setLevel(logging.WARNING)
 log = logging.getLogger("hyperion")
+
+# No short cut-offs: slow replies show live progress instead. This only stops a reply
+# whose server has died - the IDE locks its chat input while a reply is streaming.
+SAFETY_LIMIT = 600  # seconds
+HEARTBEAT = 10  # seconds without news before a "still working" line
+MAX_TEXT_CHARS = 4000  # longer messages would crowd the model's 8192-token context
+
+if not API_KEY:
+    log.error("API_KEY is not set: pass it with `docker run -e API_KEY=...` or in .env")
 
 app = FastAPI(title="Hyperion Agent")
 
@@ -37,22 +51,82 @@ def sse(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
+def user_error(exc: BaseException) -> str:
+    """A safe message for the user; the details go to the log, not the chat."""
+    if isinstance(exc, TimeoutError):
+        return prompts.TIMEOUT
+    if is_fatal(exc):
+        return prompts.LLM_KEY_REJECTED
+    if isinstance(exc, (openai.APITimeoutError, openai.APIConnectionError)):
+        return prompts.LLM_UNREACHABLE
+    return prompts.ERROR
+
+
+def precheck(text: str) -> str | None:
+    """A reply for requests that cannot be handled at all, or None."""
+    if not text.strip():
+        return prompts.EMPTY_MESSAGE
+    if len(text) > MAX_TEXT_CHARS:
+        return prompts.TOO_LONG.format(limit=MAX_TEXT_CHARS)
+    if not API_KEY and text.strip() != "/test-action":
+        return prompts.NO_API_KEY
+    return None
+
+
 async def generate_reply(request: ChatRequest):
     started = time.perf_counter()
+    if (refusal := precheck(request.text)) is not None:
+        yield sse({"response": refusal})
+        yield "data: [DONE]\n\n"
+        return
     session = await memory.get(request.user_id)
-    reply: list[str] = []
+    reply: list[str] = []  # what goes into memory: answers, not progress lines
+    channel = progress.open_channel()
+    done = object()
+
+    async def produce() -> None:
+        try:
+            async for event in agent.handle(session, request.text):
+                channel.queue.put_nowait(event)
+        except Exception as exc:  # never break the stream halfway
+            log.exception("chat failed for %r", request.text[:80])
+            channel.queue.put_nowait({"response": user_error(exc)})
+        finally:
+            channel.queue.put_nowait({"done": done})
+
+    worker = asyncio.create_task(produce())  # inherits the progress channel
+    shown_status = False
     try:
-        async for event in agent.handle(session, request.text):
+        while True:
+            if channel.elapsed() > SAFETY_LIMIT:
+                worker.cancel()
+                log.error("gave up after %ss on %r", SAFETY_LIMIT, request.text[:80])
+                reply.append(prompts.TIMEOUT)
+                yield sse({"response": prompts.TIMEOUT})
+                break
+            try:
+                event = await asyncio.wait_for(channel.queue.get(), HEARTBEAT)
+            except TimeoutError:
+                beat = prompts.HEARTBEAT.format(seconds=channel.elapsed(), step=channel.step)
+                yield sse({"response": beat})
+                continue
+            if event.get("done") is done:
+                break
+            if "status" in event:
+                shown_status = True
+                yield sse({"response": prompts.STATUS_LINE.format(step=event["status"])})
+                continue
             if "response" in event:
                 reply.append(event["response"])
+                if shown_status:  # a blank line between the progress lines and the answer
+                    shown_status = False
+                    event = {"response": "\n" + event["response"]}
             yield sse(event)
-    except Exception as exc:  # never break the stream halfway
-        log.exception("chat failed")
-        message = prompts.ERROR.format(error=exc)
-        reply.append(message)
-        yield sse({"response": message})
-    memory.add_turn(session, request.text, "".join(reply))
-    await memory.save(session)
+    finally:
+        worker.cancel()  # e.g. the user closed the IDE mid-reply
+    if not agent.is_side_question(request.text):  # /btw stays off the record
+        memory.add_turn(session, request.text, "".join(reply))
+        await memory.save(session)
     log.info("replied in %.1fs to %r", time.perf_counter() - started, request.text[:80])
     yield "data: [DONE]\n\n"
 
@@ -60,6 +134,17 @@ async def generate_reply(request: ChatRequest):
 @app.post("/chat")
 async def chat(request: ChatRequest):
     return StreamingResponse(generate_reply(request), media_type="text/event-stream")
+
+
+@app.get("/health")
+async def health():
+    """For the Docker healthcheck and for debugging an evaluator's environment."""
+    return {
+        "status": "ok" if API_KEY and rag.retriever else "degraded",
+        "llm_api_key": bool(API_KEY),
+        "rag_chunks": len(rag.retriever.documents) if rag.retriever else 0,
+        "memory": "redis" if memory.REDIS_URL else "in-process",
+    }
 
 
 if __name__ == "__main__":

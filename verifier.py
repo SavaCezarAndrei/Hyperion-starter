@@ -34,22 +34,30 @@ def code_checks(answer: str) -> Verdict:
     return Verdict(True)
 
 
+async def _verdict(system: str, content: str) -> Verdict:
+    raw = ""
+    try:
+        raw = (await llm_json.ainvoke([SystemMessage(system), HumanMessage(content)])).text
+        data = json.loads(raw)
+        ok = bool(data.get("ok", data.get("supported", True)))
+        problems = [str(p) for p in data.get("problems", []) if str(p).strip()]
+    except Exception as exc:
+        log.warning("verifier unavailable (%r), output %r - accepting", exc, raw)
+        return Verdict(True)
+    log.info("verdict ok=%s problems=%s", ok, problems)
+    return Verdict(ok, problems if not ok else [])
+
+
+async def check_file(request: str, content: str, original: str | None = None) -> Verdict:
+    """Does the YAML do what the user asked (and, for an edit, nothing else)?"""
+    before = f"ORIGINAL:\n{original}\n\n" if original is not None else ""
+    return await _verdict(prompts.FILE_VERIFIER, f"REQUEST: {request}\n\n{before}FILE:\n{content}")
+
+
 async def check_answer(question: str, evidence: str, answer: str) -> Verdict:
     verdict = code_checks(answer)
     if not verdict.ok:
         return verdict
-    messages = [
-        SystemMessage(prompts.VERIFIER),
-        HumanMessage(f"EVIDENCE:\n{evidence}\n\nQUESTION: {question}\n\nANSWER:\n{answer}"),
-    ]
-    raw = ""
-    try:
-        raw = (await llm_json.ainvoke(messages)).text
-        data = json.loads(raw)
-        problems = [str(p) for p in data.get("problems", []) if str(p).strip()]
-        ok = bool(data.get("supported", True))
-    except Exception as exc:
-        log.warning("verifier unavailable (%r), output %r - accepting answer", exc, raw)
-        return Verdict(True)
-    log.info("verdict supported=%s problems=%s", ok, problems)
-    return Verdict(ok, problems if not ok else [])
+    return await _verdict(
+        prompts.VERIFIER, f"EVIDENCE:\n{evidence}\n\nQUESTION: {question}\n\nANSWER:\n{answer}"
+    )

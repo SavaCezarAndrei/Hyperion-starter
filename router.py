@@ -7,7 +7,7 @@ from typing import Literal
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import memory
-from llm import llm_json
+from llm import is_fatal, llm_json
 
 log = logging.getLogger("hyperion.router")
 
@@ -77,6 +77,8 @@ async def classify(session: memory.Session, text: str) -> Intent:
             raw = (await llm_json.ainvoke(messages)).text
             intent = json.loads(raw).get("intent", "").strip().lower()
         except Exception as exc:
+            if is_fatal(exc):
+                raise  # a rejected key is not a bad label: let main.py explain it
             log.warning("router attempt %d failed (%r), output: %r", attempt + 1, exc, raw)
         if intent in INTENTS:
             break

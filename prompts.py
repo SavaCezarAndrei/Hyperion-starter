@@ -17,7 +17,22 @@ PLAIN_TEXT = (
 
 REFUSAL = (
     "I'm Hyperion, the HYPER-AI IDE assistant. I can only help with HYPER-AI, "
-    "its IDE and your application files."
+    "its IDE and your application files.\n"
+    "(For a quick side question, start your message with /btw - "
+    "it won't be added to our conversation.)"
+)
+
+# /btw: a side question, answered briefly and never stored in memory.
+BTW_HEADER = "💬 Side answer (/btw) - not part of our HYPER-AI conversation:\n\n"
+BTW_USAGE = "Usage: /btw <your question>. I'll answer briefly without adding it to our conversation."
+BTW_SYSTEM = (
+    "You are Hyperion, the software assistant of the HYPER-AI IDE (not the Titan from "
+    "Greek mythology), answering a quick side question the user asked with /btw. "
+    "Start directly with the answer; never repeat '/btw'. "
+    "Answer briefly - one to three sentences - from general knowledge. You have no "
+    "internet or real-time data (weather, news, prices, today's date): if the question "
+    "needs it, say so in one sentence. The earlier conversation is shown only as "
+    "context; do not continue it and do not perform any workspace actions. " + PLAIN_TEXT
 )
 
 RAG_INSTRUCTIONS = (
@@ -38,8 +53,8 @@ WEB_HEADER = (
     "documents. It may be incomplete or out of date - please double-check it.\n\n"
 )
 
-STATUS_SEARCHING = "🔎 Searching the HYPER-AI documentation and checking the answer...\n\n"
-STATUS_SPLIT = "Your message has {n} questions - answering each one:\n\n"
+STATUS_SPLIT = "🗂️ Your message has {n} questions - answering them in parallel (≈{seconds}s each)..."
+STATUS_ONE_QUESTION = "🗂️ Answering your question (≈{seconds}s)..."
 
 PLANNER = """You split a user's message into the separate questions it contains.
 Reply with JSON only: {"questions": ["...", "..."]}
@@ -104,9 +119,104 @@ WEB_INSTRUCTIONS = (
     "Keep it short: a few sentences. " + PLAIN_TEXT
 )
 
-ACTIONS_NOT_READY = (
-    "I understood that you want me to change your workspace, "
-    "but file actions are not available yet."
+# --- IDE actions (Phase 5) ---------------------------------------------------
+
+ACTION_PLANNER = """You turn a user's request into workspace tasks for the HYPER-AI IDE.
+Reply with JSON only:
+{"tasks": [{"op": "<op>", "path": "<path>", "kind": "native|device|null",
+            "workload": "DockerImage|AndroidApk|esp32Binary|null", "request": "<what to do>"}]}
+
+op is one of:
+create_file   - write a new YAML file          edit_file     - change an existing file
+delete_file   - delete a file                  create_folder - create a folder
+delete_folder - delete a folder                read_file     - show / explain a file
+validate_file - check a file against the HYPER-AI rules
+
+Rules:
+- path is relative to the workspace root, never absolute, never "..". YAML files end in .yaml.
+  Invent a short lowercase-hyphen name when the user gives none (nginx -> "nginx.yaml").
+- A file inside a folder creates the folder itself: do NOT add a separate create_folder
+  task for the folder of a file you create.
+- "it" / "this file" / "that" means the last file: {last_file}
+- kind: "native" for a deployment, service, web server, container or VM workload in the
+  cloud; "device" for an application on an edge device, DeviceNode, Android, ESP32 or
+  phone. null for folders and for read/validate/delete.
+- workload (device only): DockerImage (default), AndroidApk, esp32Binary.
+- request: everything the file must contain or the change to make, with all details the
+  user gave (image, ports, memory, cpu, names...). Do not invent details.
+- At most 4 tasks.
+
+Workspace files: {files}
+
+Examples:
+"Create a deployment YAML for a service using the nginx Docker image" ->
+{"tasks": [{"op": "create_file", "path": "nginx-deployment.yaml", "kind": "native", "workload": null, "request": "native application profile deploying the nginx Docker image"}]}
+"make a folder demo with a redis app inside" ->
+{"tasks": [{"op": "create_file", "path": "demo/redis.yaml", "kind": "native", "workload": null, "request": "native application profile running the redis container image"}]}
+"change the port to 8080" ->
+{"tasks": [{"op": "edit_file", "path": "<the last file>", "kind": null, "workload": null, "request": "set the port to 8080"}]}
+"create folder experiments" ->
+{"tasks": [{"op": "create_folder", "path": "experiments", "kind": null, "workload": null, "request": ""}]}
+"deploy a hello-world docker app to an edge device" ->
+{"tasks": [{"op": "create_file", "path": "hello-world-device.yaml", "kind": "device", "workload": "DockerImage", "request": "device application running the hello-world Docker image on an edge device"}]}"""
+
+FILE_WRITER_CREATE = """You write HYPER-AI application profiles (YAML) for the HYPER-AI IDE.
+Follow the structure of the official example exactly and include every required field.
+Change the values to fit the REQUEST. Where the request says nothing, keep the
+example's value. Never invent images, URLs or names the request does not imply.
+metadata name: short, lowercase, hyphens. Rewrite description and annotations.intent
+to describe what the REQUEST asks for, not the example. Output ONLY the YAML
+document - no explanations, no ``` fences."""
+
+FILE_WRITER_EDIT = """You edit a HYPER-AI application profile (YAML).
+Apply ONLY the requested change to the CURRENT FILE and keep every other line exactly
+as it is. Output the COMPLETE updated YAML document only - no explanations, no ``` fences."""
+
+FILE_FIX = (
+    "Your YAML was rejected. Fix exactly these problems and output the complete "
+    "corrected YAML only:\n{problems}\n\nYour previous YAML:\n{previous}"
 )
 
-ERROR ="Sorry, something went wrong on my side: {error}"
+FILE_VERIFIER = """You review a YAML file written for a user's REQUEST in the HYPER-AI IDE.
+Check ONLY that the file does what the REQUEST asks: the requested image, ports,
+resources, names and other explicit details must be present with the requested
+values. For an edit, also check that nothing unrelated to the request was changed
+compared with the ORIGINAL. Values the request did not mention may be anything.
+Reply with JSON only:
+{"ok": true, "problems": []}  or  {"ok": false, "problems": ["<short description>"]}"""
+
+CONFIRM_ASK = (
+    "⚠️ This will change your workspace:\n{changes}\n\n"
+    "Reply yes to apply it, or no to cancel."
+)
+CONFIRM_CANCELLED = "Cancelled - nothing was changed."
+CONFIRM_EXPIRED = "That confirmation is too old, so I didn't apply it. Please ask again."
+CONFIRM_DROPPED = "(I dropped the change that was waiting for your confirmation.)\n\n"
+
+ACTION_NOTHING_TO_DO = (
+    "I'm not sure what to change in your workspace. Could you say which file or "
+    "folder, and what it should contain?"
+)
+
+ERROR = "Sorry, something went wrong on my side. Please try again in a moment."
+TIMEOUT = (
+    "\nSorry, I gave up after 10 minutes - the AI server seems to be down. "
+    "Please try again later."
+)
+STATUS_LINE = "{step}\n"
+SUPERVISOR_SLOW = (
+    "⚠️ The task \"{task}\" is taking much longer than expected "
+    "({seconds}s, estimated {estimate}s)"
+)
+SUPERVISOR_CRASHED = "⚠️ The task \"{task}\" ran into a problem"
+SUPERVISOR_RESTART = " - restarting it (attempt {next} of {total})."
+SUPERVISOR_GIVE_UP = " - I've tried {total} times, so I'm skipping it this time."
+HEARTBEAT = "⏳ Still working ({seconds}s) - {step}\n"
+LLM_UNREACHABLE = "I can't reach the AI server right now. Please try again in a moment."
+LLM_KEY_REJECTED = "The AI server rejected my API key, so I can't answer right now."
+NO_API_KEY = (
+    "I'm not configured yet: no API key for the AI server was given "
+    "(start me with `-e API_KEY=...`)."
+)
+EMPTY_MESSAGE = "Your message is empty - what can I help you with?"
+TOO_LONG = "Your message is too long. Please keep it under {limit} characters."

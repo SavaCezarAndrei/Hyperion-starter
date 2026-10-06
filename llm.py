@@ -3,6 +3,7 @@
 import os
 
 import httpx
+import openai
 from dotenv import load_dotenv
 from langchain_core.embeddings import Embeddings
 from langchain_openai import ChatOpenAI
@@ -10,17 +11,22 @@ from langchain_openai import ChatOpenAI
 load_dotenv()
 
 API_KEY = os.environ.get("API_KEY", "")
+# The OpenAI client refuses to even be created without a key, which would crash the
+# server at startup; main.py answers "not configured" instead when API_KEY is empty.
+CLIENT_KEY = API_KEY or "not-set"
 BASE_URL = "https://legion1.di.uoa.gr/v1"
 MODEL = "llama3.1"  # Llama 3.1 8B, 8192-token context
-# The shared server sometimes stalls for 30 s+: cut a stalled call and retry it once.
-TIMEOUT = 30
+# The shared server is sometimes slow. Calls are NOT cut short: the user sees live
+# progress meanwhile (progress.py), and main.SAFETY_LIMIT only ends a dead reply.
+# A failed connection is retried once.
+TIMEOUT = httpx.Timeout(600, connect=15)
 MAX_RETRIES = 1
 
 # Free-text answers (streamed to the user).
 llm = ChatOpenAI(
     model=MODEL,
     base_url=BASE_URL,
-    api_key=API_KEY,
+    api_key=CLIENT_KEY,
     max_completion_tokens=2048,
     temperature=0.2,
     timeout=TIMEOUT,
@@ -31,12 +37,19 @@ llm = ChatOpenAI(
 llm_json = ChatOpenAI(
     model=MODEL,
     base_url=BASE_URL,
-    api_key=API_KEY,
+    api_key=CLIENT_KEY,
     max_completion_tokens=512,
     temperature=0,
     timeout=TIMEOUT,
     max_retries=MAX_RETRIES,
 ).bind(response_format={"type": "json_object"})
+
+
+def is_fatal(exc: BaseException) -> bool:
+    """Errors that retrying cannot fix: the server rejects our key."""
+    if isinstance(exc, (openai.AuthenticationError, openai.PermissionDeniedError)):
+        return True
+    return isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code in (401, 403)
 
 
 class LegionEmbeddings(Embeddings):

@@ -69,6 +69,25 @@ def test_valid_request_is_not_refused():
     assert "only help with HYPER-AI" not in text
 
 
+def test_btw_answers_a_side_question():
+    text, actions = send(new_user(), "/btw what is the capital of France?")
+    assert "Side answer (/btw)" in text
+    assert "paris" in text.lower()
+    assert actions == []
+
+
+def test_btw_is_not_stored_in_memory():
+    user = new_user()
+    send(user, "/btw my name is Zorblax, just reply ok")
+    text, _ = send(user, "What is my name?")
+    assert "zorblax" not in text.lower()
+
+
+def test_btw_without_question_shows_usage():
+    text, _ = send(new_user(), "/btw")
+    assert "Usage: /btw" in text
+
+
 # --- Phase 4: RAG ------------------------------------------------------------
 
 
@@ -115,12 +134,14 @@ def test_rag_follow_up_uses_memory():
 # --- Phase 5: IDE actions ----------------------------------------------------
 
 
-@todo
 def test_creates_nginx_yaml():
-    _, actions = send(
-        new_user(), "Create a deployment YAML for a service using the nginx Docker image"
-    )
-    files = [a for a in actions if a["action"] == "create_file"]
+    # The grading example. If the workspace already has a file with the chosen name,
+    # Hyperion (rightly) asks before overwriting it - so confirm in that case.
+    user = new_user()
+    reply, actions = send(user, "Create a deployment YAML for a service using the nginx Docker image")
+    if "Reply yes" in reply:
+        _, actions = send(user, "yes")
+    files = [a for a in actions if a["action"] in ("create_file", "edit_file")]
     assert files and files[0]["path"].endswith((".yaml", ".yml"))
     assert "nginx" in files[0]["content"]
 
@@ -128,10 +149,15 @@ def test_creates_nginx_yaml():
 # --- Phase 6: human in the loop ----------------------------------------------
 
 
-@todo
 def test_delete_needs_confirmation():
-    user = new_user()
-    _, actions = send(user, "delete nginx.yaml")
-    assert not any(a["action"] == "delete_file" for a in actions)
-    _, actions = send(user, "yes")
-    assert any(a["action"] == "delete_file" for a in actions)
+    import ide  # plays the IDE: applies our actions to the backend
+
+    user, path = new_user(), f"zz-test-{uuid.uuid4().hex[:6]}/app.yaml"
+    ide.apply({"action": "create_file", "path": path, "content": "x: 1\n"})
+    try:
+        _, actions = send(user, f"delete {path}")
+        assert not any(a["action"] == "delete_file" for a in actions)
+        _, actions = send(user, "yes")
+        assert any(a["action"] == "delete_file" for a in actions)
+    finally:
+        ide.delete(path.split("/")[0])

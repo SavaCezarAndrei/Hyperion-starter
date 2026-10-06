@@ -1,4 +1,4 @@
-# Hyperion: progress report (Phases 0–4)
+# Hyperion: progress report (Phases 0–7)
 
 ## 1. The architecture we agreed on
 
@@ -13,17 +13,20 @@ The diagram is in `ai.drawio`: page 1 is the original design, page **"v2 – orc
 
 Measured: legion1 runs requests in parallel, so 4 parallel calls take about as long as 1.
 
+The orchestrator (worker manager) **estimates each task's duration**, and a **supervisor** (plain code) restarts any worker that runs past its estimate + 1 minute, or that crashes. **Live progress** shows each step to the user while the work goes on (Phase 7).
+
 ```
 POST /chat {user_id, text}
    │
-   ├─▶ [0] Pending confirmation? ── yes/no → execute / cancel              (Phase 6 – todo)
+   ├─▶ [0] Pending confirmation? ── yes/no → execute / cancel (in code)               ✅
    ├─▶ [1] Router (1 LLM call, JSON) → question | action | chitchat | off_topic       ✅
    ├── off_topic → fixed refusal (guardrail)                                          ✅
    ├── chitchat  → short LLM reply                                                    ✅
    ├── question  → ORCHESTRATOR → N question workers in parallel                      ✅
    │                 evidence (hybrid RAG) → draft → verify → retry → web fallback 🔴
-   └── action    → ORCHESTRATOR → N file workers                         (Phases 5–6 – todo)
-                     DSL spec + cookbook → YAML → verify (parse, fields, validate_file)
+   └── action    → ORCHESTRATOR → N action workers in parallel                        ✅
+                     cookbook template + required DSL fields → YAML → backend validator
+                     + LLM check vs request → retry ×2;  delete / overwrite / edit → confirm
    │
    └─▶ Memory[user_id] in its own Redis container (fallback: in-process)              ✅
 ```
@@ -36,8 +39,8 @@ POST /chat {user_id, text}
 | Guardrails (refuse off-topic) | ✅ done, 97% router accuracy |
 | Memory within a session | ✅ done, Redis container plus in-process fallback |
 | RAG over the HYPER-AI documents | ✅ done, 26 sources, verified answers with sources |
-| Natural language → IDE actions | ⏳ Phase 5 (the pipeline is already proven end to end) |
-| Human in the loop (optional) | ⏳ Phase 6 |
+| Natural language → IDE actions | ✅ done, every generated file passes the backend's HYPER-AI validator |
+| Human in the loop (**mandatory** for our team, though the PDF calls it optional) | ✅ done, deletes, overwrites and edits always wait for yes/no, enforced in code, with an exact change summary |
 
 ---
 
@@ -141,6 +144,108 @@ Sessions are stored there when `REDIS_URL` is set. Otherwise, or if Redis goes d
 
 **IDE display:** the chat shows plain text only (no HTML or Markdown, checked in the IDE's source code). That's why answers are plain text and the "red" marker is the 🔴 emoji.
 
+**`/btw` side questions** (like Claude's): `/btw <question>` gets a short answer to anything, marked "💬 Side answer". It can see the conversation, but is never saved to memory. Plain off-topic questions are still refused, so the guardrail criterion holds, and the refusal mentions `/btw`.
+
+### Phase 5: IDE actions
+
+**What the IDE does with our actions.** Measured directly against the backend, and read from the IDE's own code:
+- **Folders are automatic:** `create_file` creates missing parent folders itself, so no `create_folder` is needed before a file.
+- **No overwriting by creating:** creating a file or folder that already exists fails, so overwriting goes through `edit_file`.
+- **Concurrent execution:** the IDE runs the streamed actions concurrently, not one after another.
+- **Ambiguous names:** if a name matches several files, the IDE silently does nothing, so the agent resolves names itself first.
+- **`validate_file` is excellent:** exact field, line and message for each problem, and the cookbook examples pass.
+
+**Validate before sending (option B).** The agent writes each draft to a hidden scratch file (`.hyperion-check-*.yaml`) through the backend, validates it, deletes it, and only then sends `create_file` or `edit_file`. **The user only ever sees validated files.** If the backend can't be reached, `dsl.check` validates locally instead.
+
+**New modules:**
+
+| File | Role |
+|---|---|
+| `workspace.py` | Lists the workspace (walking the folder tree), cleans paths (`..`, absolute paths and reserved names are rejected; `.yaml` is added), resolves names the way the IDE does, validates through the scratch file |
+| `dsl.py` | Cookbook templates and **required fields read from the ✅ rows of the official specification**, so they can't drift; local fallback check; strips ``` fences |
+| `orchestrator.plan_actions` / `run_actions` | Planner (sees the workspace file list, `last_file` and the last 2 turns) → up to 4 tasks → action workers in parallel → stream in order |
+| `workers.action_worker` / `write_file` | One task → IDE actions + a line for the user; the file worker's draft, validate and retry loop |
+| `tests/ide.py` | Stands in for the browser in tests: applies the streamed actions to the backend with the frontend's own calls |
+
+**The file worker:**
+1. **Evidence:** the matching cookbook example (native, device Docker, device Android) plus the ✅ required-field rows. For an edit, the current file from `read_file`.
+2. **Draft:** the writer produces YAML only. Edits change only what was asked.
+3. **Check ①:** the backend validator, using the scratch file.
+4. **Check ②:** an LLM check that the file does what was asked (image, ports, resources) and, for edits, that nothing else changed.
+5. **Retry:** up to 2 retries with the exact problems. If problems remain, the file is still created, with a ⚠️ list of them, not silently.
+
+**Supported requests:** create files (native and device), edit ("change the port to 8080", with "it" meaning the last file), create and delete folders, delete files, read files ("what's inside app.yaml?", which also fixes the router's known miss), and validate files ("is app.yaml valid?"). Missing or ambiguous targets get a clear message and no action.
+
+**Measured:** the grading example (nginx deployment YAML) takes about 7 s and passes validation. On the first try the validator caught a missing `containerImage`, and the retry fixed it. A device app takes about 4 s.
+
+**Bugs found by testing in the container:** the image lacked the specification pages `dsl.py` reads, so they're now copied in by the Dockerfile. The phrase "not explicitly stated" wasn't recognised as "not covered", and the web test failed until it was.
+
+### Phase 6: Human in the loop (`confirm.py`)
+
+**Mandatory, and enforced in code.** Human in the loop is a hard requirement for the team. The confirmation question is attached in `workers.action_worker` to every delete, overwrite and edit, and `run_actions` never sends an action that has a question attached. No prompt, planner output or user wording ("no need to ask", "skip confirmation") can bypass it; a test checks this. **Any new state-changing operation must set `question` too.**
+
+**What waits for confirmation:** deletes (files and folders), overwrites, and **edits**, because `edit_file` replaces the whole file. New files, reads and validation run immediately.
+
+**How it works:**
+- **Held back:** `run_actions` stores a state-changing result in `session.pending` (saved in Redis) instead of sending it, and asks:
+  ```
+  ⚠️ This will change your workspace:
+  - ✏️ change nginx-deployment.yaml:
+      specs.network.ports[0].port: 80 -> 8080
+
+  Reply yes to apply it, or no to cancel.
+  ```
+- **Exact summary:** the change list is computed in code by comparing the old and new YAML field by field, so the user approves exactly what will happen. A folder delete says how many files are inside.
+- **Decided in code before the router**, with no LLM involved:
+  - **yes** ("yes", "ok", "go ahead", "da"…) → the stored actions are sent.
+  - **no** ("no", "cancel", "nu"…) → "Cancelled - nothing was changed".
+  - **anything else** → the pending change is dropped, with a note, and the new message is handled normally. A long "yes, but rename it first…" counts as a new request.
+- **Expiry:** a confirmation older than 10 minutes is not applied by a late "yes".
+- **`/btw` doesn't interfere:** a `/btw` side question asked while a change is waiting doesn't cancel it.
+
+**Tests:** delete waits for yes; "no" cancels and a later "yes" deletes nothing; moving on drops the change; overwrite waits; a new file needs no confirmation; yes/no detection and the change summary as unit tests.
+
+### Phase 7: Hardening
+
+The goal: the image must behave well in the **evaluators'** environment, not just ours.
+
+| Risk | Before | Now |
+|---|---|---|
+| No `API_KEY` given | **The container crashed at startup** (the OpenAI client refuses an empty key) | Starts; `/health` says `degraded`; chat replies "I'm not configured yet… start me with `-e API_KEY=...`" |
+| Wrong `API_KEY` | Raw exception text in the chat | "The AI server rejected my API key" |
+| legion1 slow or down | One reply could hang for minutes with no sign of life | **No short time-outs.** Every step is streamed live, with a heartbeat every 10 s; a worker running past **its estimate + 1 minute** is restarted by the supervisor (see below); only a 10-minute safety limit ends a reply whose server has died |
+| IDE backend unreachable | Untested | Questions still work; files are still created and checked by the local DSL check; deletes send nothing |
+| Internal errors | `"…went wrong: <exception>"` exposed internals | A plain message in the chat; full details only in the log |
+| Empty or very long message | Sent to the model | Answered directly ("empty", or "keep it under 4000 characters") |
+| Rebuilds | Installed whatever versions were newest that day | `uv sync --frozen`: exactly the versions in `uv.lock` |
+| Container user | root | Non-root user `hyperion` (uid 10001) |
+| Monitoring | None | `GET /health` (key present, RAG chunks, memory type) plus a Docker `HEALTHCHECK` |
+
+**Live progress instead of time-outs** (`progress.py`). Slow work is never cut short. The user sees each step as it happens, labelled with its task, and a heartbeat if nothing new happens for 10 s:
+```
+🧭 Understanding your request...
+📋 Plan: create file demo/redis-deployment.yaml
+✍️ Writing the native application profile... [demo/redis-deployment.yaml]
+🧪 Validating with the HYPER-AI rules... [demo/redis-deployment.yaml]
+🔁 Fixing 1 problem(s) (attempt 2)... [demo/redis-deployment.yaml]
+⏳ Still working (40s) - 🧪 Validating with the HYPER-AI rules... [demo/redis-deployment.yaml]
+```
+Progress lines are shown but **not stored in memory**, so they don't clutter the model's context. Only a 10-minute safety limit remains, because the IDE locks its chat input while a reply streams, and a dead server must not lock it forever.
+
+**Supervisor** (`supervisor.py`). An extra agent that watches every worker, the question workers and the action workers:
+- **Plain code, not an LLM,** so the component that judges "too slow" can't stall or misjudge itself.
+- **Estimates from the worker manager** (`estimates.py`). The orchestrator gives every task an estimated duration and shows it, e.g. `📋 Plan: create file demo/redis.yaml (≈7s)`. Estimates come from **measurements, not from asking the LLM**, which can't predict its own speed:
+  - **Starting point:** defaults measured on legion1, with headroom (question 10 s, new or edited file 20 s, delete 2 s…).
+  - **Self-learning:** every finished task updates a running average for its type, and the estimate is that average × 1.5. If the shared server gets slower, the estimates grow with it.
+  - **Revised mid-task:** a worker taking a slower path extends its own budget and says so. A question falling back to the web shows *"🌐 … searching the web (≈25s more)"*. That extra time is left out of the average for plain questions.
+- **Restart rule: running longer than its estimate + 1 minute.** The worker gets a friendly message, *"⚠️ The task "demo/nginx.yaml" is taking much longer than expected (67s, estimated 7s) - restarting it (attempt 2 of 3)."*, and is cancelled and restarted with a fresh budget.
+- **Crashes** are restarted the same way. After 3 attempts the task is skipped with a message, and the other tasks still finish.
+- **No pointless retries:** a rejected API key is passed straight to the user ("The AI server rejected my API key"), and the other tasks are cancelled. Found by `check_image.py`: the first version restarted 3 times on a wrong key.
+- **Restarting is safe:** workers never change the workspace themselves. They only return actions, which are sent (or held for confirmation) once they finish.
+- **Tests:** `tests/test_supervisor.py` (time scaled down) covers: a worker over estimate + grace is restarted; one within it is left alone; extending the budget prevents a restart; crashes are restarted; giving up after 3 attempts; estimates learn from measured times; steps are labelled with their task.
+
+**`tests/check_image.py`** runs the **bare image** the way the evaluators will (no compose, no Redis, port 8001) in 4 scenarios: no key, wrong key, the normal evaluator setup, and no IDE backend. Run it before every push, and again after pulling the pushed tag (Phase 8).
+
 ---
 
 ## 3. Testing
@@ -150,6 +255,9 @@ Sessions are stored there when `REDIS_URL` is set. Otherwise, or if Redis goes d
 | End-to-end tests | `docker compose up --build -d` then `uv run pytest tests -v` | Every grading criterion against the running container |
 | Router | `uv run pytest tests/test_router.py -v -s` | Router accuracy on 30 labelled sentences |
 | Verifier and workers | `uv run pytest tests/test_verifier.py -v` | Catches hallucinations, accepts paraphrases, planner splits, worker answers from the docs |
+| IDE actions | `uv run pytest tests/test_actions.py -v` | Create, edit, read, validate and delete in throwaway `zz-test-*` folders (cleaned up), plus path and DSL unit tests |
+| The image as evaluators run it | `uv run tests/check_image.py [image]` | Bare image in 4 environments: no key, wrong key, normal, no IDE backend |
+| Health | `curl localhost:8000/health` | Key present, RAG chunks loaded, memory type |
 | Terminal chat | `uv run tests/client.py "question"` or `--user ana` | Manual chat; prints text and actions |
 | IDE | http://localhost:5000 → Hyperion (robot) icon | The real experience |
 | Logs | `docker compose logs -f hyperion` | Router choices, retrieval scores, verifier verdicts, reply times |
@@ -170,6 +278,9 @@ Sessions are stored there when `REDIS_URL` is set. Otherwise, or if Redis goes d
 6. **legion1 rejects `encoding_format`,** so LangChain's `OpenAIEmbeddings` can't be used. Use `LegionEmbeddings`.
 7. **Measure before trusting a component.** The first verifier rejected good answers, which pushed documented questions to the web and produced a wrong answer about Windows "device nodes".
 8. **Free web search is unreliable** (rate limits) and "Hyper AI" is also an SK Telecom product, so web queries are anchored to the EU project.
+9. **Test the image, not just the code.** In-process tests passed while the container failed, because files `dsl.py` needs weren't copied into the image. Always run the suite against `docker compose up --build`.
+10. **Don't write Python strings containing `\n` through shell heredocs**: the escapes turn into real line breaks and break the file. Use an editor.
+11. **Test the broken environments too.** The image crashed at startup without `API_KEY`, which we only found by running it without one. In evaluation that would have meant a dead container instead of a clear message.
 
 ---
 
@@ -177,9 +288,6 @@ Sessions are stored there when `REDIS_URL` is set. Otherwise, or if Redis goes d
 
 | Phase | Work |
 |---|---|
-| **5: IDE actions** | Orchestrator → file workers: evidence (DSL spec + cookbook via RAG), YAML draft, verification (YAML parses, required DSL fields, `validate_file`), retry with errors, path cleanup, edits via `read_file` + `edit_file` |
-| **6: Human in the loop** | Save delete and overwrite actions in `session.pending`; resolve yes/no in code before the router |
-| **7: Hardening** | Timeouts, retries, full test pass against the container |
 | **8: Ship** | Push `<user>/hyperion:latest`, test from a clean pull with `-e API_KEY=…`, README and demo script |
 
 **Open questions for the organiser:**

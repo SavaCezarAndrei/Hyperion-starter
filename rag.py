@@ -150,8 +150,9 @@ answer_chain = answer_prompt | llm | StrOutputParser()
 
 # Backup for when the model explains instead of answering with the NOT_COVERED marker.
 NOT_COVERED_PHRASES = re.compile(
-    r"(do not|don't|does not|doesn't) (cover|mention|contain)|not (mentioned|covered|"
-    r"provided|specified|included) in|no information",
+    r"(do not|don't|does not|doesn't) (explicitly )?(cover|mention|contain|state|say)|"
+    r"(is|are) not (explicitly |directly )?(mentioned|covered|provided|specified|included|"
+    r"stated|given|available)|no information",
     re.I,
 )
 
