@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 import memory
 import prompts
+import rag
 import router
 from llm import llm
 
@@ -34,8 +35,7 @@ async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
         async for event in chat(session, text):
             yield event
     elif intent == "question":
-        # TODO Phase 4: rag.answer(session, text)
-        async for event in chat(session, text):
+        async for event in rag.answer(session, text):
             yield event
     else:
         # TODO Phase 5: actions.run(session, text)

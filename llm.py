@@ -2,7 +2,9 @@
 
 import os
 
+import httpx
 from dotenv import load_dotenv
+from langchain_core.embeddings import Embeddings
 from langchain_openai import ChatOpenAI
 
 load_dotenv()
@@ -28,3 +30,54 @@ llm_json = ChatOpenAI(
     max_completion_tokens=512,
     temperature=0,
 ).bind(response_format={"type": "json_object"})
+
+
+class LegionEmbeddings(Embeddings):
+    """nomic-embed-text on legion1.
+
+    Not OpenAIEmbeddings: the OpenAI SDK always sends `encoding_format`, which
+    legion1 rejects. nomic also expects task prefixes on every text.
+    """
+
+    model = "nomic-embed-text"  # 768 dimensions
+    batch_size = 32
+    timeout = 60
+
+    def _payload(self, texts: list[str]) -> dict:
+        return {"model": self.model, "input": texts}
+
+    @staticmethod
+    def _vectors(response: httpx.Response) -> list[list[float]]:
+        response.raise_for_status()
+        data = sorted(response.json()["data"], key=lambda d: d["index"])
+        return [d["embedding"] for d in data]
+
+    def _embed(self, texts: list[str]) -> list[list[float]]:
+        vectors = []
+        with httpx.Client(timeout=self.timeout) as client:
+            for i in range(0, len(texts), self.batch_size):
+                response = client.post(
+                    f"{BASE_URL}/embeddings",
+                    headers={"Authorization": f"Bearer {API_KEY}"},
+                    json=self._payload(texts[i : i + self.batch_size]),
+                )
+                vectors += self._vectors(response)
+        return vectors
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed([f"search_document: {t}" for t in texts])
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed([f"search_query: {text}"])[0]
+
+    async def aembed_query(self, text: str) -> list[float]:
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{BASE_URL}/embeddings",
+                headers={"Authorization": f"Bearer {API_KEY}"},
+                json=self._payload([f"search_query: {text}"]),
+            )
+        return self._vectors(response)[0]
+
+
+embeddings = LegionEmbeddings()

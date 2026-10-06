@@ -7,6 +7,8 @@ COPY pyproject.toml ./
 RUN uv sync --no-dev
 
 COPY *.py ./
+# RAG index, built locally by build_index.py (the source documents are not needed).
+COPY data/index.json ./data/
 
 ENV IDE_BACKEND_URL=http://host.docker.internal:3001/api
 
