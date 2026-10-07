@@ -42,6 +42,19 @@ Have the HyperAI IDE running locally (each command runs in the foreground — us
    docker compose up --build
    ```
 
+   To see the Docker image that was built (Compose names it `<folder>-hyperion`,
+   so `hyperion-starter-hyperion` by default):
+
+   ```bash
+   docker images hyperion-starter-hyperion   # the image, its tag and size
+   docker compose images                     # images used by every service in the stack
+   docker compose ps                         # running containers, ports and health
+   docker compose logs -f hyperion           # the agent's output
+   ```
+
+   It also shows up in Docker Desktop under **Images** and, while running, under
+   **Containers** → `hyperion-starter`.
+
 3. In the IDE, open **Hyperion** from the sidebar (the robot icon), type something, and watch the answer stream back token by token.
 
 You can also test the endpoint without the IDE:
