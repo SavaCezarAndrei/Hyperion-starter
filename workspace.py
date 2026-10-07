@@ -117,19 +117,39 @@ def unsafe_paths(text: str) -> list[str]:
         if (
             re.match(r"^[a-zA-Z]:[\\/]", token)  # C:\temp, C:/temp
             or token.startswith(("~/", "~\\"))  # home folder
-            or (token.startswith("/") and token.count("/") >= 2)  # /etc/passwd
+            or (token.startswith(("/", "\\")) and len(token) > 1)  # /etc/passwd, /x.yaml
             or ".." in parts  # ../x, a/../../b, ..
         ):
             found.append(token)
     return found
 
 
+def _says(name: str, said: str) -> bool:
+    """`name` appears in `said` as a whole name, not inside a longer one:
+    "api.yaml" is not said by "r-api.yaml", nor "web.yaml" by "qa/web.yaml"."""
+    return re.search(rf"(?<![\w./\\-]){re.escape(name)}(?![\w-])", said) is not None
+
+
+def names(path: str, text: str) -> bool:
+    """The message names this file itself: its whole path or its whole file name."""
+    said = text.lower().replace("\\", "/")
+    return _says(path.lower(), said) or _says(path.lower().rsplit("/", 1)[-1], said)
+
+
+def names_path(path: str, text: str) -> bool:
+    """The message gives this file's full path ("qa/web.yaml"), not just its name."""
+    return "/" in path and _says(path.lower(), text.lower().replace("\\", "/"))
+
+
 def mentioned(path: str, text: str) -> bool:
-    """Whether the user's message names this file or folder (by path, name or stem)."""
+    """Whether the message names this file or folder: by path or name, or by a stem or
+    name part of 3+ letters as a whole word. One-letter stems ("y" of y.yaml) never
+    count - they are inside every other word ("yes", "python", "yaml")."""
+    if names(path, text):
+        return True
     said = text.lower()
-    name = path.lower().rsplit("/", 1)[-1]
-    stem = name.rsplit(".", 1)[0]
-    if path.lower() in said or name in said or stem in said:
+    stem = path.lower().rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    if len(stem) >= 3 and _says(stem, said):
         return True
     words = set(re.findall(r"[a-z0-9]+", said))
     parts = [p for p in re.split(r"[-_.]", stem) if len(p) >= 3 and p not in GENERIC_NAME_PARTS]

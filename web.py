@@ -29,6 +29,7 @@ MAX_RESULTS = 5
 SEARCH_TIMEOUT = 10  # seconds per backend
 PAGES_TO_READ = 2  # full pages fetched from the top results
 PAGE_TIMEOUT = 8
+MAX_LINK_CHARS = 200
 PASSAGE_CHARS = 1500  # relevant text kept per page (the model has 8192 tokens)
 # "Hyper AI" is also an unrelated product name; anchor searches to the EU project.
 PROJECT_HINT = "EU Horizon project computing continuum"
@@ -119,7 +120,10 @@ async def gather(question: str) -> WebEvidence:
         if i <= len(pages) and pages[i - 1]:
             block += f"\nFrom the page:\n{pages[i - 1]}"
         blocks.append(block)
-    return WebEvidence("\n\n".join(blocks), [r["href"] for r in results[:3]])
+    # Ad and tracking redirects (bing.com/aclick?..., hundreds of characters) are not
+    # sources a user can check; show real page links only.
+    links = [r["href"] for r in results if len(r["href"]) <= MAX_LINK_CHARS and "/aclick?" not in r["href"]]
+    return WebEvidence("\n\n".join(blocks), links[:3])
 
 
 async def draft(question: str, evidence: str, feedback: str = "", general: bool = False) -> str:

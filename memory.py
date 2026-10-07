@@ -12,6 +12,10 @@ from dataclasses import asdict, dataclass, field
 
 import redis.asyncio as redis
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from redis.asyncio.retry import Retry
+from redis.backoff import ExponentialBackoff
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 log = logging.getLogger("hyperion.memory")
 
@@ -31,8 +35,24 @@ class Session:
     pending: dict | None = None  # action waiting for the user's yes/no
 
 
+def redis_client(url: str) -> redis.Redis | None:
+    """A Redis client that survives a Redis restart: idle connections are checked
+    before use and a dropped one is retried on a fresh connection. Without this the
+    first command after a restart failed with "Connection lost" and its write was lost."""
+    if not url:
+        return None
+    return redis.from_url(
+        url,
+        decode_responses=True,
+        retry=Retry(ExponentialBackoff(cap=1, base=0.1), retries=3),
+        retry_on_error=[RedisConnectionError, RedisTimeoutError, ConnectionResetError],
+        health_check_interval=15,
+        socket_connect_timeout=2,
+    )
+
+
 _local: dict[str, Session] = {}
-_redis = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
+_redis = redis_client(REDIS_URL)
 log.info("session store: %s", "redis" if _redis else "in-process")
 
 
@@ -41,8 +61,8 @@ async def get(user_id: str) -> Session:
         try:
             raw = await _redis.get(KEY_PREFIX + user_id)
             return Session(**json.loads(raw)) if raw else Session(user_id=user_id)
-        except Exception:
-            log.exception("redis unavailable, using in-process memory")
+        except Exception as exc:  # an outage, not a bug: no stack trace
+            log.warning("redis unavailable (%s), using in-process memory", exc)
     return _local.setdefault(user_id, Session(user_id=user_id))
 
 
@@ -54,8 +74,8 @@ async def save(session: Session) -> None:
                 KEY_PREFIX + session.user_id, json.dumps(asdict(session)), ex=SESSION_TTL
             )
             return
-        except Exception:
-            log.exception("redis unavailable, using in-process memory")
+        except Exception as exc:
+            log.warning("redis unavailable (%s), using in-process memory", exc)
     _local[session.user_id] = session
 
 

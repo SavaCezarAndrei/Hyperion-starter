@@ -26,15 +26,31 @@ YES = {
 NO = {"no", "n", "nope", "cancel", "stop", "abort", "don't", "dont", "do not", "nu", "no thanks"}
 
 
+# Words that may follow a yes or no without changing it ("yes please", "go ahead now").
+FILLER = {"please", "thanks", "thank", "you", "sure", "ok", "okay", "go", "ahead", "do", "it",
+          "now", "yes", "yeah", "yep", "y", "da", "no", "nope", "cancel", "stop", "that"}
+
+
+def _words(text: str) -> list[str]:
+    return re.sub(r"[^\w' ]", " ", text.lower()).split()
+
+
 def answer(text: str) -> str | None:
-    """'yes', 'no' or None (the message is about something else)."""
-    words = re.sub(r"[^\w' ]", " ", text.lower()).split()
+    """'yes', 'no' or None (the message is about something else). Extra words must be
+    filler: "yes please" is a yes, "ok, delete x.yaml" is a new request."""
+    words = _words(text)
     phrase = " ".join(words)
-    if phrase in YES or (words and words[0] in YES and len(words) <= 3):
+    rest_is_filler = all(w in FILLER for w in words[1:])
+    if phrase in YES or (words and words[0] in YES and rest_is_filler):
         return "yes"
-    if phrase in NO or (words and words[0] in NO and len(words) <= 3):
+    if phrase in NO or (words and words[0] in NO and rest_is_filler):
         return "no"
     return None
+
+
+def starts_with_yes(text: str) -> bool:
+    words = _words(text)
+    return bool(words) and (words[0] in YES or " ".join(words[:2]) in YES)
 
 
 def is_bare_answer(text: str) -> bool:

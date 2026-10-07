@@ -214,7 +214,33 @@ CONFIRM_ASK_EDIT = (
 WHICH_OTHER_FILE = (
     "Which file should I make this change in instead? Files in your workspace: {files}"
 )
-SEVERAL_FILES_MATCH = "Several files match: {files}. Which one do you mean?"
+SEVERAL_FILES_MATCH = "Several files match: {files}. Which one do you mean? Nothing was changed."
+NO_SUCH_OTHER_FILE = (
+    "There is no file called {name} in your workspace. The change to {current} is still "
+    "waiting: reply yes to apply it, no to cancel, or name another file."
+)
+NOT_YAML = (
+    "I only write HYPER-AI application profiles, which are YAML files: '{path}' is not a "
+    ".yaml or .yml file. Nothing was changed."
+)
+NOTHING_TO_CHANGE = "{path} already has those values - nothing to change."
+CANNOT_APPLY = (
+    "I couldn't make that change to {path} - the result would not be a valid HYPER-AI "
+    "application profile:\n{problems}\nNothing was changed."
+)
+RENAME_UNSUPPORTED = (
+    "I can't rename files: the IDE has no rename action. You can rename it in the file "
+    "explorer, or ask me to create the new file and then delete the old one. Nothing was changed."
+)
+SAME_PATH_TWICE = "You asked for {path} twice - I only did the first one."
+TOO_MANY_TASKS = "I can do at most {n} changes per message, so I skipped these - ask again for them:\n{skipped}"
+TOO_MANY_QUESTIONS = (
+    "\n\nI answer at most {n} questions per message, so I skipped these - ask again for them:\n{skipped}"
+)
+CHAT_NO_INSTRUCTIONS = (
+    "I'm Hyperion, the HYPER-AI IDE assistant. I can't share my instructions, but I can "
+    "answer questions about HYPER-AI and work on your application files."
+)
 CONFIRM_CANCELLED = "Cancelled - nothing was changed."
 CONFIRM_NOTHING_PENDING = (
     "There's nothing waiting for your confirmation right now, so nothing was changed. "

@@ -25,6 +25,24 @@ Event = dict
 
 BTW = "/btw"
 MENTIONS_FILE = re.compile(r"\b[\w./-]+\.ya?ml\b", re.I)
+# HTML/script markup is never part of a request; left in, it derails retrieval and
+# the answer check ("<script>alert(1)</script> What is HYPER-AI?").
+MARKUP = re.compile(r"<script\b.*?</script\s*>|<style\b.*?</style\s*>|</?[a-z][^<>]{0,200}>", re.I | re.S)
+# Attempts to replace the assistant's instructions get the same refusal as off-topic.
+INJECTION = re.compile(
+    r"\b(ignore|disregard|forget|override)\b[^.?!]{0,40}\b(instructions|rules|prompt|guidelines)\b"
+    r"|\byou are now\b|\bpretend (to be|you are)\b|\bact as (a|an)\b|\bjailbreak\b"
+    r"|\b(print|show|reveal|repeat)\b[^.?!]{0,30}\b(system prompt|instructions)\b",
+    re.I,
+)
+# "show it" / "delete that" right after working on a file: an action on that file.
+ACT_ON_LAST_FILE = re.compile(
+    r"^\s*(please\s+)?(show|open|read|display|print|view|validate|check|delete|remove)\s+"
+    r"(me\s+)?(it|that|this)(\s+(file|one))?\s*(again)?\s*[.!?]*\s*$", re.I)
+
+
+def strip_markup(text: str) -> str:
+    return MARKUP.sub(" ", text).strip()
 
 
 def is_side_question(text: str) -> bool:
@@ -38,6 +56,10 @@ def off_the_record(text: str) -> bool:
 
 
 async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
+    text = strip_markup(text)
+    if not text:
+        yield {"response": prompts.EMPTY_MESSAGE}
+        return
     if is_side_question(text):
         async for event in side_answer(session, text.strip()[len(BTW) :].strip()):
             yield event
@@ -73,6 +95,14 @@ async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
         # A lone "yes"/"no" with nothing pending must never reach the router: it would
         # read the conversation ("delete X" ... "yes") and plan the change again.
         yield {"response": prompts.CONFIRM_NOTHING_PENDING}
+        return
+
+    if INJECTION.search(text):
+        yield {"response": prompts.REFUSAL}
+        return
+    if session.last_file and ACT_ON_LAST_FILE.match(text):
+        async for event in orchestrator.run_actions(session, text):
+            yield event
         return
 
     progress.report("🧭 Understanding your request...")
@@ -119,6 +149,16 @@ async def chat(session: memory.Session, text: str) -> AsyncIterator[Event]:
         *memory.history(session),
         HumanMessage(text),
     ]
-    async for chunk in llm.astream(messages):
-        if chunk.text:
-            yield {"response": chunk.text}
+    # Collected, not streamed: a chitchat reply is short, and it is checked first - asked
+    # "what was my previous message?" with no history, the model quoted its instructions.
+    reply = (await llm.ainvoke(messages)).text
+    if leaks_instructions(reply):
+        reply = prompts.CHAT_NO_INSTRUCTIONS
+    yield {"response": reply}
+
+
+def leaks_instructions(reply: str) -> bool:
+    """The reply repeats a long stretch of the system prompt."""
+    words = prompts.SYSTEM.lower().split()
+    said = " ".join(reply.lower().split())
+    return any(" ".join(words[i : i + 8]) in said for i in range(len(words) - 7))

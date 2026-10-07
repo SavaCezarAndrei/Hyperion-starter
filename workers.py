@@ -118,10 +118,15 @@ async def with_knowledge(
     return result
 
 
+PROJECT_FRESHNESS = 5  # seconds; questions about the user's own files re-read them this often
+
+
 async def answer_from_project(question: str) -> Result | None:
     """Questions about the user's own apps, answered from the workspace graph:
     in code when the question is structured, otherwise drafted and verified. If no
     draft passes, the graph's facts are shown as they are - never the docs or web."""
+    if knowledge.PROJECT_WORDS.search(question) or knowledge.files_by_app_name(question):
+        await knowledge.ensure_fresh(PROJECT_FRESHNESS)  # a file edited by hand a moment ago counts
     if found := knowledge.lookup(question):
         progress.report("🧠 Answered from your project's knowledge graph")
         text, paths = found
@@ -190,13 +195,7 @@ file_chain = (
 )
 
 
-def names_file(path: str, question: str) -> bool:
-    """The question names the file itself ("x.yaml", "demo/x.yaml"), not just a word of it."""
-    said = question.lower()
-    return any(
-        re.search(rf"(?<![\w./-]){re.escape(name)}(?![\w-])", said)
-        for name in (path.lower(), path.lower().rsplit("/", 1)[-1])
-    )
+names_file = workspace.names  # the question names the file itself, not a word of it
 
 
 async def workspace_evidence(question: str) -> tuple[str, list[str], bool]:
@@ -318,20 +317,111 @@ def describe_errors(report: dict) -> list[str]:
     ]
 
 
-async def file_problems(content: str, kind: str, request: str, original: str | None) -> list[str]:
-    """① the ide-backend's validator (or the local DSL check), ② does it do what was asked."""
+async def validation_errors(content: str, kind: str) -> list[str]:
+    """The ide-backend's validator, or the local DSL check when it is unreachable."""
     report = await workspace.validate_content(content)
     if report is None:
-        errors = dsl.check(content, kind)
-    else:
-        errors = describe_errors(report)
-        if not errors and report.get("type") not in (None, kind):
-            errors = [f"this is a {report['type']} application, but a {kind} one was requested"]
-    if errors:
+        return dsl.check(content, kind)
+    errors = describe_errors(report)
+    if not errors and report.get("type") not in (None, kind):
+        errors = [f"this is a {report['type']} application, but a {kind} one was requested"]
+    return errors
+
+
+# Words in a request that allow changing a field whose path does not contain them.
+FIELD_WORDS = {
+    "image": {"uri", "tag", "container"}, "version": {"tag"}, "tag": {"uri"},
+    "port": {"ports", "network"}, "ports": {"port", "network"}, "expose": {"ports", "port"},
+    "memory": {"resources"}, "cpu": {"resources"}, "storage": {"resources"},
+    "rename": {"name"}, "name": {"metadata"}, "describe": {"description"},
+}
+GENERIC_KEY_PARTS = {"specs", "spec", "application", "profile"}
+
+
+def unrequested_changes(original: str, content: str, request: str) -> list[str]:
+    """Fields an edit changed that the request never mentions: the model rewrote them
+    (seen: "set the port" also renamed the app, raised the memory, and changed the
+    --port argument instead of the network port)."""
+    asked = set(re.findall(r"[a-z]+", request.lower()))
+    asked |= {w for word in list(asked) for w in FIELD_WORDS.get(word, ())}
+    problems = []
+    for line in confirm.changes(original, content):
+        if line.startswith(("... and", "no field changes", "the whole file")):
+            continue
+        key = re.sub(r"^(remove|add) ", "", line).split(":")[0].split(" (")[0].strip()
+        parts = set(re.findall(r"[a-z]+", re.sub(r"([a-z])([A-Z])", r"\1 \2", key).lower()))
+        if not (parts - GENERIC_KEY_PARTS) & asked:
+            problems.append(
+                f"{key} was changed, but the request does not ask for that - keep it exactly "
+                "as in the CURRENT FILE"
+            )
+    return problems
+
+
+async def file_problems(content: str, kind: str, request: str, original: str | None) -> list[str]:
+    """① the validator, ② for an edit: no field changed that was not asked for,
+    ③ an LLM check that the file does what was asked."""
+    if errors := await validation_errors(content, kind):
         return errors
+    if original is not None and (extra := unrequested_changes(original, content, request)):
+        return extra
     progress.report("🧐 Checking it matches your request...")
     verdict = await verifier.check_file(request, content, original)
     return verdict.problems
+
+
+# Simple field changes are made in code, on the exact line: precise, and no LLM call.
+# request word -> (value pattern, YAML block the field is in, field)
+QUICK_FIELDS = {
+    "port": (r"\bport\b(?:\s+[\w-]+){0,4}?\s+(?:to|=|:)\s*(\d{1,5})\b", "ports", "port"),
+    "memory": (r"\bmemory\b(?:\s+[\w-]+){0,4}?\s+(?:to|=|:)\s*(\d+(?:\.\d+)?(?:[KMGTE]i?)?)\b",
+               "resources", "memory"),
+    "cpu": (r"\bcpu\b(?:\s+[\w-]+){0,4}?\s+(?:to|=|:)\s*(\d+m|\d+(?:\.\d+)?)\b", "resources", "cpu"),
+    "storage": (r"\bstorage\b(?:\s+[\w-]+){0,4}?\s+(?:to|=|:)\s*(\d+(?:\.\d+)?(?:[KMGTE]i?)?)\b",
+                "resources", "storage"),
+}
+
+
+def _set_field(text: str, block: str, field_name: str, value: str) -> str | None:
+    """`text` with the first `field_name:` inside `block:` set to `value`, or None."""
+    lines = text.splitlines(keepends=True)
+    start = next((i for i, l in enumerate(lines) if re.match(rf"^\s*{block}:\s*$", l)), None)
+    if start is None:
+        return None
+    indent = len(lines[start]) - len(lines[start].lstrip())
+    for i in range(start + 1, len(lines)):
+        line = lines[i].rstrip("\r\n")
+        own = len(line) - len(line.lstrip())
+        if line.strip() and own <= indent and not line.lstrip().startswith("-"):
+            return None  # left the block
+        m = re.match(rf"^(\s*(?:-\s*)?{field_name}:\s*)(['\"]?)([^'\"#]*?)\2(\s*(?:#.*)?)$", line)
+        if m:
+            ending = lines[i][len(line):]
+            lines[i] = f"{m.group(1)}{m.group(2)}{value}{m.group(2)}{m.group(4)}{ending}"
+            return "".join(lines)
+    return None
+
+
+def quick_edit(original: str, request: str) -> str | None:
+    """The edited file when every part of the request is a simple field change
+    ("set the port to 8081 and the memory to 2Gi"); None to let the model do it."""
+    content, fields = original, set()
+    for clause in [c for c in re.split(r"\band\b|,|;", request) if c.strip()]:
+        for word, (pattern, block, field_name) in QUICK_FIELDS.items():
+            if m := re.search(pattern, clause, re.I):
+                content = _set_field(content, block, field_name, m.group(1))
+                if content is None:
+                    return None
+                fields.add(field_name)
+                break
+        else:
+            return None  # a part we cannot do exactly
+    if content == original:
+        return original  # already has these values
+    changed = confirm.changes(original, content)
+    if any(not re.sub(r"\[\d+\]", "", line.split(":")[0]).endswith(tuple(fields)) for line in changed):
+        return None
+    return content
 
 
 async def write_file(task: Task, original: str | None = None) -> tuple[str, list[str], str]:
@@ -360,7 +450,13 @@ async def write_file(task: Task, original: str | None = None) -> tuple[str, list
                 f"Reference:\n{reference}\n\nCURRENT FILE:\n{original}\n\nCHANGE: {task.request}"
             ),
         ]
-    content, problems = "", []
+    if original is not None and (quick := quick_edit(original, task.request)) is not None:
+        progress.report("✍️ Changing the field directly...")
+        if quick == original:
+            return quick, [], kind
+        progress.report("🧪 Validating with the HYPER-AI rules...")
+        return quick, await validation_errors(quick, kind), kind
+    content, problems, first_problems = "", [], []
     for attempt in range(1, FILE_ATTEMPTS + 1):
         messages = base
         if problems:
@@ -375,9 +471,22 @@ async def write_file(task: Task, original: str | None = None) -> tuple[str, list
         progress.report("🧪 Validating with the HYPER-AI rules...")
         problems = await file_problems(content, kind, task.request, original)
         log.info("%s attempt %d: %s", task.path, attempt, problems or "ok")
+        if attempt == 1:
+            first_problems = problems
         if not problems:
             break
+    if original is not None and same_document(content, original) and first_problems:
+        # "Fixed" by putting the old values back ("memory: banana" -> unchanged): the
+        # change could not be made. Report why, never "already has those values".
+        return original, first_problems, kind
     return content, problems, kind
+
+
+def same_document(a: str, b: str) -> bool:
+    try:
+        return yaml.safe_load(a) == yaml.safe_load(b)
+    except yaml.YAMLError:
+        return a == b
 
 
 def written(verb: str, path: str, kind: str, problems: list[str]) -> str:
@@ -416,6 +525,8 @@ async def action_worker(
         path = workspace.clean_path(name, is_file=task.op in FILE_OPS)
     except workspace.PathError as exc:
         return ActionResult(f"I can't use that path: {exc}.")
+    if task.op in ("create_file", "edit_file") and not path.lower().endswith(workspace.YAML_SUFFIXES):
+        return ActionResult(prompts.NOT_YAML.format(path=path))
 
     if task.op == "create_folder":
         if path in entries.folders:
@@ -468,6 +579,11 @@ async def action_worker(
 
     # edit_file, or create_file over an existing file: both replace the whole file.
     content, problems, kind = await write_file(task, original)
+    if same_document(content, original):
+        if problems:
+            listed = "\n".join(f"  - {p}" for p in problems)
+            return ActionResult(prompts.CANNOT_APPLY.format(path=found, problems=listed), path=found)
+        return ActionResult(prompts.NOTHING_TO_CHANGE.format(path=found), path=found)
     if task.op == "edit_file":
         verb, header = "Updated", f"- ✏️ change {found}:"
     else:

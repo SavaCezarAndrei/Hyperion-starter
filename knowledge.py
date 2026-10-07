@@ -30,7 +30,7 @@ import re
 import time
 from dataclasses import asdict, dataclass, field
 
-import redis.asyncio as redis
+import memory
 import yaml
 
 import dsl
@@ -89,7 +89,7 @@ class Answer:
 _files: dict[str, FileFacts] = {}
 _answers: dict[str, Answer] = {}
 _meta: dict = {}
-_redis = redis.from_url(REDIS_URL, decode_responses=True) if REDIS_URL else None
+_redis = memory.redis_client(REDIS_URL)  # survives a Redis restart, see memory.py
 _sync_lock = asyncio.Lock()
 _last_sync = 0.0
 
@@ -115,8 +115,8 @@ async def _store(table: str, key: str, value: dict | None) -> None:
             await _redis.hdel(KEY_PREFIX + table, key)
         else:
             await _redis.hset(KEY_PREFIX + table, key, json.dumps(value))
-    except Exception:
-        log.exception("redis unavailable, the knowledge graph stays in memory")
+    except Exception as exc:
+        log.warning("redis unavailable (%s), the knowledge graph stays in memory", exc)
 
 
 async def load() -> None:
@@ -131,6 +131,9 @@ async def load() -> None:
             _meta.update(json.loads(await _redis.get(KEY_PREFIX + "meta") or "{}"))
         except Exception:
             log.exception("could not load the knowledge graph from redis")
+    for key in [k for k, a in _answers.items() if not learnable(a.question)]:
+        del _answers[key]  # learned under older, looser rules (follow-ups, "today")
+        await _store("answers", key, None)
     if not _meta.get("created"):
         _meta["created"] = time.time()
         log.info("new project: creating the knowledge graph")
@@ -142,8 +145,8 @@ async def _save_meta() -> None:
     if _redis:
         try:
             await _redis.set(KEY_PREFIX + "meta", json.dumps(_meta))
-        except Exception:
-            log.exception("redis unavailable, the knowledge graph stays in memory")
+        except Exception as exc:
+            log.warning("redis unavailable (%s), the knowledge graph stays in memory", exc)
 
 
 def _count(name: str) -> None:
@@ -256,6 +259,14 @@ async def sync(reason: str) -> None:
                  time.perf_counter() - started)
 
 
+async def ensure_fresh(max_age: float = MIN_SYNC_INTERVAL) -> None:
+    """Re-read the workspace before using the graph if the last sync is older than
+    `max_age` seconds: a file edited by hand in the IDE is then seen in the same
+    session (a sync of a few dozen files takes ~0.1 s)."""
+    if time.monotonic() - _last_sync >= max_age:
+        await sync("before use")
+
+
 def on_new_session() -> None:
     """A new chat session: count it and refresh the workspace graph in the background."""
     _count("sessions")
@@ -311,6 +322,17 @@ def files_named_by(text: str) -> list[str]:
 def identifies(path: str, text: str) -> bool:
     """Whether the user's words point at this file through the graph."""
     return path in files_named_by(text)
+
+
+def files_by_app_name(text: str) -> list[str]:
+    return sorted(p for p, f in _files.items() if f.name and _says(f.name, text))
+
+
+def files_by_image(text: str) -> list[str]:
+    """Every file whose image the text names ("the nginx app"), shared or not."""
+    return sorted(
+        p for p, f in _files.items() if any(_says(_short_image(i), text) for i in f.images)
+    )
 
 
 def project_evidence(question: str) -> tuple[str, list[str]]:
@@ -452,9 +474,32 @@ async def _vector(question: str) -> list[float] | None:
         return None
 
 
+# Only a self-contained question is worth remembering: not a follow-up that depends on
+# its conversation ("and how is it registered?"), not a statement ("my name is X"),
+# and not something whose answer changes by the day ("today's date", "latest news").
+QUESTION_START = re.compile(
+    r"^\s*(what|who|whom|whose|which|where|when|why|how|is|are|was|were|does|do|did|can|"
+    r"could|should|would|will|list|explain|describe|define|tell me)\b", re.I)
+FOLLOW_UP = re.compile(
+    r"^\s*(and|but|so|also|then|or|what about|how about)\b"
+    r"|\b(it|its|they|them|their|this|that|these|those|he|she|him|her)\b", re.I)
+TIME_SENSITIVE = re.compile(
+    r"\b(today|tonight|now|current(ly)?|latest|recent(ly)?|news|weather|price|prices|"
+    r"yesterday|tomorrow|this (week|month|year)|date|time)\b", re.I)
+
+
+def learnable(question: str) -> bool:
+    q = question.strip()
+    if not (q.endswith("?") or QUESTION_START.match(q)):
+        return False
+    if TIME_SENSITIVE.search(q):
+        return False
+    return not FOLLOW_UP.search(q)
+
+
 async def recall(question: str) -> Answer | None:
     """A verified answer to the same question, learned in this or an earlier session."""
-    if not _answers:
+    if not _answers or not learnable(question):
         return None
     words = rag.tokenize(question)
     exact = _answers.get(_key(question))
@@ -476,7 +521,9 @@ async def recall(question: str) -> Answer | None:
 
 
 async def remember(question: str, kind: str, text: str, sources: list[str]) -> None:
-    if kind not in CACHED_KINDS or not text or (vector := await _vector(question)) is None:
+    if kind not in CACHED_KINDS or not text or not learnable(question):
+        return
+    if (vector := await _vector(question)) is None:
         return
     answer = Answer(question, rag.tokenize(question), vector, kind, text, sources,
                     INDEX_VERSION, created=time.time())

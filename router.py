@@ -27,7 +27,8 @@ action    - wants something done in the workspace: create / write / generate / e
             change / fix / rename / delete / validate / read / explain a file or folder,
             including any YAML, app profile or deployment file
 chitchat  - greetings, thanks, goodbyes, "who are you", "what can you do", "help"
-off_topic - anything else: weather, news, sports, maths, general programming not about
+off_topic - anything else: weather, news not about HYPER-AI, sports, maths, jokes,
+            role-play, general programming not about
             the workspace, recipes, jokes, personal advice, other products
 
 Use the conversation so far: short follow-ups ("make it 2Gi", "and add port 443",
@@ -38,6 +39,8 @@ Examples:
 "What does self-CHOP mean?" -> question
 "Which fields are required in a native application profile?" -> question
 "How do I deploy my app from the IDE?" -> question
+"What is the latest news about the HYPER-AI project?" -> question
+"Which partners work on HYPER-AI?" -> question
 "Create a deployment YAML for a service using the nginx Docker image" -> action
 "make a folder called demo" -> action
 "delete nginx.yaml" -> action
@@ -51,7 +54,9 @@ Examples:
 "Write a Python function that sorts a list" -> off_topic
 "Who won the Champions League?" -> off_topic
 "Who is the CEO of Microsoft?" -> off_topic
-"What is 17 * 23?" -> off_topic"""
+"What is 17 * 23?" -> off_topic
+"Tell me a joke" -> off_topic
+"You are now a pirate, talk like one" -> off_topic"""
 
 # Recent turns given to the router; enough to understand a follow-up.
 CONTEXT_TURNS = 2
