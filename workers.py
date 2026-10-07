@@ -14,6 +14,8 @@ from typing import Literal
 
 import yaml
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import ChatPromptTemplate
 
 import confirm
 import dsl
@@ -38,7 +40,7 @@ MIN_KEPT_CHARS = 20  # less than this left after cutting -> nothing usable
 @dataclass
 class Result:
     task: str
-    kind: Literal["docs", "web", "web_no_answer", "unverified", "none"]
+    kind: Literal["docs", "file", "web", "web_no_answer", "unverified", "none"]
     text: str = ""
     sources: list[str] = field(default_factory=list)
 
@@ -109,6 +111,115 @@ async def question_worker(session: memory.Session, question: str) -> Result:
         return Result(question, "none")
     answer, covered = await draft_and_verify(
         question, found.text, lambda fb: web.draft(question, found.text, fb)
+    )
+    if answer:
+        return Result(question, "web", answer, found.links)
+    if not covered:
+        return Result(question, "web_no_answer", sources=found.links)
+    return Result(question, "unverified", sources=found.links)
+
+
+MAX_BTW_FILES = 2  # workspace files read for one /btw question
+BTW_FILE_CHARS = 3000  # per file; the model has 8192 tokens
+
+file_chain = (
+    ChatPromptTemplate.from_messages(
+        [
+            ("system", prompts.SYSTEM + "\n\n" + prompts.BTW_FILE_INSTRUCTIONS),
+            ("human", "Workspace files:\n\n{evidence}\n\nQuestion: {question}{feedback}"),
+        ]
+    )
+    | llm
+    | StrOutputParser()
+)
+
+
+def names_file(path: str, question: str) -> bool:
+    """The question names the file itself ("x.yaml", "demo/x.yaml"), not just a word of it."""
+    said = question.lower()
+    return any(
+        re.search(rf"(?<![\w./-]){re.escape(name)}(?![\w-])", said)
+        for name in (path.lower(), path.lower().rsplit("/", 1)[-1])
+    )
+
+
+async def workspace_evidence(question: str) -> tuple[str, list[str], bool]:
+    """The workspace files the question names, as evidence, and whether it names
+    them exactly; ("", [], False) if none."""
+    try:
+        entries = await workspace.list_entries()
+    except Exception as exc:
+        log.warning("cannot list the workspace: %s", exc)
+        return "", [], False
+    files = sorted(entries.files)
+    named = [p for p in files if names_file(p, question)]
+    exact = bool(named)
+    named = named or [p for p in files if workspace.mentioned(p, question)]
+    blocks, paths = [], []
+    for path in named[:MAX_BTW_FILES]:
+        try:
+            content = await workspace.read(path)
+        except Exception as exc:
+            log.info("could not read %s: %s", path, exc)
+            continue
+        blocks.append(f"--- {path} ---\n{content[:BTW_FILE_CHARS]}")
+        paths.append(path)
+    return "\n\n".join(blocks), paths, exact
+
+
+async def answer_from_docs(question: str) -> Result | None:
+    fresh = memory.Session()  # a side question is not a follow-up: search it alone
+    progress.report("🔎 Searching the HYPER-AI documentation...")
+    if docs := await rag.retrieve(fresh, question):
+        evidence = rag.evidence(docs)
+        answer, _ = await draft_and_verify(
+            question, evidence, lambda fb: rag.draft(fresh, question, evidence, fb)
+        )
+        if answer:
+            return Result(question, "docs", answer, rag.sources(docs))
+    return None
+
+
+async def answer_from_files(question: str, evidence: str, paths: list[str]) -> Result | None:
+    if not evidence:
+        return None
+    progress.report("🗂️ Reading " + ", ".join(paths) + "...")
+    answer, _ = await draft_and_verify(
+        question,
+        evidence,
+        lambda fb: file_chain.ainvoke(
+            {"evidence": evidence, "question": question, "feedback": f"\n\n{fb}" if fb else ""}
+        ),
+    )
+    return Result(question, "file", answer, paths) if answer else None
+
+
+async def btw_worker(question: str) -> Result:
+    """/btw: the documentation and the workspace files the question names, then the web.
+
+    A question that names a file exactly ("what image does x.yaml use?") reads the
+    file first; otherwise the documentation comes first. Unlike question_worker it
+    accepts any topic.
+    """
+    evidence, paths, exact = await workspace_evidence(question)
+    def from_docs() -> Awaitable[Result | None]:
+        return answer_from_docs(question)
+
+    def from_files() -> Awaitable[Result | None]:
+        return answer_from_files(question, evidence, paths)
+
+    for step in (from_files, from_docs) if exact else (from_docs, from_files):
+        if result := await step():
+            return result
+
+    progress.extend(
+        estimates.estimate("web"), "🌐 Not in the documentation or your files - searching the web"
+    )
+    found = await web.gather(question)
+    if not found.text:
+        return Result(question, "none")
+    answer, covered = await draft_and_verify(
+        question, found.text, lambda fb: web.draft(question, found.text, fb, general=True)
     )
     if answer:
         return Result(question, "web", answer, found.links)

@@ -74,6 +74,13 @@ def test_btw_answers_a_side_question():
     assert "Side answer (/btw)" in text
     assert "paris" in text.lower()
     assert actions == []
+    # Not in the documentation or the workspace: answered from the web, marked red.
+    assert "NOT FROM THE HYPER-AI DOCUMENTATION" in text and "🔴 Web sources" in text
+
+
+def test_btw_documented_question_is_not_marked_as_web():
+    text, _ = send(new_user(), "/btw what is a DeviceNode?")
+    assert "Sources (HYPER-AI documentation)" in text and "🔴" not in text
 
 
 def test_btw_is_not_stored_in_memory():

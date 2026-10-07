@@ -1,7 +1,7 @@
-"""Web fallback for on-topic questions the HYPER-AI documents do not cover.
+"""Web fallback for questions the HYPER-AI documents do not cover.
 
 Only reached after the router accepted the question, so off-topic requests are
-still refused. Evidence = search snippets + the most relevant paragraphs of the
+still refused - except through /btw, which may ask about anything. Evidence = search snippets + the most relevant paragraphs of the
 top result pages. Answers are drafted only from that evidence, verified by the
 question worker, and always labelled as not coming from the documentation.
 """
@@ -40,6 +40,15 @@ web_prompt = ChatPromptTemplate.from_messages(
     ]
 )
 web_chain = web_prompt | llm | StrOutputParser()
+
+# /btw may be about anything, so its web answers are not limited to the EU project.
+general_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", prompts.BTW_WEB_INSTRUCTIONS),
+        ("human", "Web search results:\n\n{evidence}\n\nQuestion: {question}{feedback}"),
+    ]
+)
+general_chain = general_prompt | llm | StrOutputParser()
 
 
 @dataclass
@@ -113,8 +122,8 @@ async def gather(question: str) -> WebEvidence:
     return WebEvidence("\n\n".join(blocks), [r["href"] for r in results[:3]])
 
 
-async def draft(question: str, evidence: str, feedback: str = "") -> str:
-    return await web_chain.ainvoke(
+async def draft(question: str, evidence: str, feedback: str = "", general: bool = False) -> str:
+    return await (general_chain if general else web_chain).ainvoke(
         {
             "evidence": evidence,
             "question": question,

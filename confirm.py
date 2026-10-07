@@ -81,6 +81,8 @@ def changes(before: str, after: str) -> list[str]:
 def ask(items: list[dict]) -> str:
     """The question shown to the user for the stored items."""
     listed = "\n".join(item["question"] for item in items)
+    if len(items) == 1 and "task" in items[0]:  # one edit: it can go to another file
+        return prompts.CONFIRM_ASK_EDIT.format(changes=listed)
     return prompts.CONFIRM_ASK.format(changes=listed)
 
 

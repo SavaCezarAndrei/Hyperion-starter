@@ -13,6 +13,26 @@ services:
       memory:
         condition: service_healthy
 
+  # The HYPER-AI IDE (from the README's prerequisites), so the whole stack starts
+  # with one `docker compose up`. The agent reaches the backend through the
+  # published port (IDE_BACKEND_URL=http://host.docker.internal:3001/api).
+  ide-backend:
+    image: donmichael/ide-backend:latest
+    environment:
+      AUTH_ENABLED: "false"
+    ports:
+      - "3001:3001"
+    networks: [public]
+    restart: unless-stopped
+
+  ide-gui:
+    image: donmichael/ide-gui:latest
+    ports:
+      - "5000:80"
+    networks: [public]
+    depends_on: [ide-backend]
+    restart: unless-stopped
+
   # Session memory. No published ports: reachable only by the agent, over the
   # internal network, with a password. Data survives restarts in a volume.
   memory:

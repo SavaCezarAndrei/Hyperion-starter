@@ -88,6 +88,21 @@ def test_edit_follow_up_changes_only_the_port(folder):
     assert after["applicationProfile"]["metadata"] == before["applicationProfile"]["metadata"]
 
 
+def test_pending_edit_can_move_to_another_file(folder):
+    user = str(uuid.uuid4())
+    _, first = act(user, f"Create a deployment YAML in {folder}/redis.yaml for redis on port 80")
+    other = created(first)[0]["path"]
+    _, second = act(user, f"Create a deployment YAML in {folder}/web.yaml for nginx on port 80")
+    selected = created(second)[0]["path"]
+    reply, actions = act(user, "change the port to 8080")
+    assert actions == [] and selected in reply and "name another file" in reply
+    reply, actions = act(user, "no, in redis.yaml")
+    assert actions == [] and other in reply and "80 -> 8080" in reply
+    _, actions = act(user, "yes")
+    assert [a["path"] for a in actions if a["action"] == "edit_file"] == [other]
+    assert "8080" not in ide.read(selected)
+
+
 def test_read_and_validate_a_file(folder):
     user = str(uuid.uuid4())
     _, first = act(user, f"Create a deployment YAML in {folder} for nginx")
@@ -287,3 +302,12 @@ def test_cookbook_examples_pass_local_checks():
 def test_local_check_reports_missing_fields():
     broken = dsl.template("native").replace('    owner: "UoA-Team"\n', "")
     assert dsl.check(broken, "native") == ["metadata.owner is required"]
+
+
+def test_btw_names_file_only_on_the_whole_name():
+    import workers
+
+    assert workers.names_file("x.yaml", "which image does x.yaml use?")
+    assert workers.names_file("demo/x.yaml", "what is in demo/x.yaml")
+    assert not workers.names_file("y.yaml", "which image does x.yaml use?")  # 'y' is everywhere
+    assert not workers.names_file("x.yaml", "what is in xx.yaml")

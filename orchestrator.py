@@ -10,7 +10,9 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import AsyncIterator
+from dataclasses import asdict
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -55,6 +57,8 @@ def render(result: workers.Result) -> str:
     """A worker result as chat text. Anything not from the documentation is marked red."""
     if result.kind == "docs":
         return result.text + "\n\nSources (HYPER-AI documentation): " + "; ".join(result.sources)
+    if result.kind == "file":
+        return prompts.FROM_FILES.format(files=", ".join(result.sources)) + result.text
     if result.kind == "web":
         links = "\n".join(f"  {link}" for link in result.sources)
         return (
@@ -142,6 +146,82 @@ def guesses_target(task: workers.Task, text: str, session: memory.Session) -> bo
     return not workspace.mentioned(name, text)
 
 
+async def run_task(
+    session: memory.Session, task: workers.Task, entries: workspace.Entries
+) -> workers.ActionResult:
+    return await supervisor.supervise(
+        task.path or task.op,
+        task.op,
+        lambda: workers.action_worker(session, task, entries),
+        lambda: workers.ActionResult(
+            f"I couldn't finish {task.path or 'that request'} - nothing was "
+            "changed. Please try again."
+        ),
+    )
+
+
+def pending_item(task: workers.Task, result: workers.ActionResult) -> dict:
+    item = {"question": result.question, "actions": result.actions,
+            "done": result.message, "path": result.path}
+    if task.op == "edit_file":
+        # Kept so the user can answer "no, in other.yaml" and get the same change there.
+        item["task"] = asdict(task)
+    return item
+
+
+# A reply that also asks for something else is a new request, not "use this file instead".
+OTHER_REQUEST = re.compile(
+    r"\b(delete|remove|create|read|show|validate|check|rename|what|how|why)\b", re.I
+)
+ANOTHER_FILE = re.compile(r"\b(another|other|different|wrong)\b.*\bfile\b", re.I)
+
+
+async def retarget(session: memory.Session, text: str) -> AsyncIterator[dict]:
+    """A pending edit, answered with another file's name: make the same change there.
+
+    Yields nothing if the reply is not about choosing another file (the caller then
+    handles it as a yes/no or a new message).
+    """
+    items = (session.pending or {}).get("items", [])
+    if len(items) != 1 or "task" not in items[0] or confirm.answer(text) == "yes":
+        return
+    if OTHER_REQUEST.search(text):
+        return
+    current = items[0]["path"]
+    try:
+        entries = await workspace.list_entries()
+    except Exception as exc:
+        log.warning("cannot list the workspace: %s", exc)
+        return
+    others = sorted(entries.files - {current})
+    said = text.lower()
+    named = [p for p in others if workspace.mentioned(p, text)]
+    exact = [p for p in named if p.lower() in said or p.lower().rsplit("/", 1)[-1] in said]
+    named = exact or named
+    if not named:
+        if ANOTHER_FILE.search(text):  # "use another file": keep the change waiting, ask which
+            session.pending["created"] = time.time()
+            listed = ", ".join(others[:MAX_LISTED_FILES]) or "(no other files)"
+            yield {"response": prompts.WHICH_OTHER_FILE.format(files=listed)}
+        return
+    if len(named) > 1:
+        session.pending["created"] = time.time()
+        yield {"response": prompts.SEVERAL_FILES_MATCH.format(files=", ".join(named))}
+        return
+
+    session.pending = None
+    task = workers.Task(**{**items[0]["task"], "path": named[0]})
+    log.info("retarget pending edit %s -> %s", current, task.path)
+    progress.report(f"📋 Making the same change in {task.path} instead...")
+    result = await run_task(session, task, entries)
+    if result.question and result.actions:
+        item = pending_item(task, result)
+        confirm.store(session, [item])
+        yield {"response": confirm.ask([item])}
+    else:
+        yield {"response": result.message}
+
+
 async def run_actions(session: memory.Session, text: str) -> AsyncIterator[dict]:
     if unsafe := workspace.unsafe_paths(text):
         # Checked on the user's words: the planner would "repair" these paths.
@@ -175,27 +255,16 @@ async def run_actions(session: memory.Session, text: str) -> AsyncIterator[dict]
 
     async def run(task: workers.Task) -> workers.ActionResult:
         async with limit:
-            return await supervisor.supervise(
-                task.path or task.op,
-                task.op,
-                lambda: workers.action_worker(session, task, entries),
-                lambda: workers.ActionResult(
-                    f"I couldn't finish {task.path or 'that request'} - nothing was "
-                    "changed. Please try again."
-                ),
-            )
+            return await run_task(session, task, entries)
 
     running = [asyncio.create_task(run(t)) for t in tasks]
     to_confirm = []
     try:
-        for job in running:
+        for task, job in zip(tasks, running):
             result = await job
             if result.question and result.actions:
                 # State-changing: held back until the user says yes (confirm.py).
-                to_confirm.append(
-                    {"question": result.question, "actions": result.actions,
-                     "done": result.message, "path": result.path}
-                )
+                to_confirm.append(pending_item(task, result))
                 continue
             for action in result.actions:
                 yield action

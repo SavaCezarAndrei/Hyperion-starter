@@ -16,6 +16,8 @@ import orchestrator
 import progress
 import prompts
 import router
+import supervisor
+import workers
 from llm import llm
 
 Event = dict
@@ -45,6 +47,12 @@ async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
     # A change is waiting for yes/no: decided in code, before the router.
     if session.pending:
         replied = False
+        # "no, in nginx.yaml": the same edit on another file, asked again.
+        async for event in orchestrator.retarget(session, text):
+            replied = True
+            yield event
+        if replied:
+            return
         async for event in confirm.resolve(session, text):
             replied = True
             yield event
@@ -77,28 +85,21 @@ async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
 async def side_answer(session: memory.Session, question: str) -> AsyncIterator[Event]:
     """Like Claude's /btw: a quick answer to anything, off the record.
 
-    It sees the conversation for context but bypasses the router (so off-topic is
-    allowed here, on explicit request) and is never written to memory.
+    It bypasses the router (so off-topic is allowed here, on explicit request) and is
+    never written to memory. The answer comes from the documentation, the workspace
+    files the question names, or the web - and web answers are marked 🔴.
     """
     if not question:
         yield {"response": prompts.BTW_USAGE}
         return
-    messages = [
-        SystemMessage(prompts.BTW_SYSTEM),
-        *memory.history(session),
-        HumanMessage(question),
-    ]
     yield {"response": prompts.BTW_HEADER}
-    started = False
-    async for chunk in llm.astream(messages):
-        text = chunk.text
-        if not started:  # the model sometimes echoes the command: "/btw Canberra is..."
-            text = text.lstrip()
-            if text.lower().startswith(BTW):
-                text = text[len(BTW) :].lstrip()
-            started = bool(text)
-        if text:
-            yield {"response": text}
+    result = await supervisor.supervise(
+        question,
+        "question",
+        lambda: workers.btw_worker(question),
+        lambda: workers.Result(question, "none"),
+    )
+    yield {"response": orchestrator.render(result)}
 
 
 async def chat(session: memory.Session, text: str) -> AsyncIterator[Event]:
