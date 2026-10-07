@@ -18,6 +18,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 import confirm
 import estimates
+import knowledge
 import memory
 import progress
 import prompts
@@ -59,6 +60,8 @@ def render(result: workers.Result) -> str:
         return result.text + "\n\nSources (HYPER-AI documentation): " + "; ".join(result.sources)
     if result.kind == "file":
         return prompts.FROM_FILES.format(files=", ".join(result.sources)) + result.text
+    if result.kind == "project":
+        return prompts.FROM_PROJECT.format(files=", ".join(result.sources)) + result.text
     if result.kind == "web":
         links = "\n".join(f"  {link}" for link in result.sources)
         return (
@@ -88,10 +91,12 @@ def transcript(session: memory.Session, turns: int = 2) -> str:
 async def plan_actions(
     session: memory.Session, text: str, entries: workspace.Entries
 ) -> list[workers.Task]:
-    files = sorted(entries.files)[:MAX_LISTED_FILES]
+    # Each file with what the knowledge graph knows about it (app, image, ports), so
+    # "change the port of the nginx app" finds the right file.
+    files = knowledge.describe_files(sorted(entries.files)[:MAX_LISTED_FILES])
     system = prompts.ACTION_PLANNER.replace(
         "{last_file}", session.last_file or "none yet"
-    ).replace("{files}", ", ".join(files) or "(the workspace is empty)")
+    ).replace("{files}", "\n" + "\n".join(f"- {f}" for f in files) if files else "(the workspace is empty)")
     raw = ""
     try:
         raw = (
@@ -143,6 +148,8 @@ def guesses_target(task: workers.Task, text: str, session: memory.Session) -> bo
         session.last_file, session.last_file.rsplit("/", 1)[-1]
     ):
         return False
+    if any(knowledge.identifies(p, text) for p in workspace.resolve(name, knowledge.known_files())):
+        return False  # named through the graph: "the nginx app", "my-web-app"
     return not workspace.mentioned(name, text)
 
 

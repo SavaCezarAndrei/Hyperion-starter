@@ -20,6 +20,7 @@ from langchain_core.prompts import ChatPromptTemplate
 import confirm
 import dsl
 import estimates
+import knowledge
 import memory
 import progress
 import prompts
@@ -40,7 +41,7 @@ MIN_KEPT_CHARS = 20  # less than this left after cutting -> nothing usable
 @dataclass
 class Result:
     task: str
-    kind: Literal["docs", "file", "web", "web_no_answer", "unverified", "none"]
+    kind: Literal["docs", "file", "project", "web", "web_no_answer", "unverified", "none"]
     text: str = ""
     sources: list[str] = field(default_factory=list)
 
@@ -87,6 +88,61 @@ async def draft_and_verify(
 
 
 async def question_worker(session: memory.Session, question: str) -> Result:
+    # A short follow-up ("and how does it register them?") depends on the conversation:
+    # it is answered normally, never stored or matched as a question of its own.
+    standalone = rag.search_query(session, question) == question
+    return await with_knowledge(
+        question, lambda: search_question(session, question), learn=standalone
+    )
+
+
+async def btw_worker(question: str) -> Result:
+    return await with_knowledge(question, lambda: search_btw(question))
+
+
+async def with_knowledge(
+    question: str, search: Callable[[], Awaitable[Result]], learn: bool = True
+) -> Result:
+    """The project knowledge graph first: a verified answer learned in this or an
+    earlier session, or the project's own facts; otherwise search, and learn."""
+    # About the user's own project: answered from the graph only, and never learned -
+    # the answer changes with the workspace.
+    if result := await answer_from_project(question):
+        return result
+    if learn and (known := await knowledge.recall(question)):
+        progress.report(prompts.KNOWLEDGE_REUSED)
+        return Result(question, known.kind, known.text, known.sources)
+    result = await search()
+    if learn:
+        await knowledge.remember(question, result.kind, result.text, result.sources)
+    return result
+
+
+async def answer_from_project(question: str) -> Result | None:
+    """Questions about the user's own apps, answered from the workspace graph:
+    in code when the question is structured, otherwise drafted and verified. If no
+    draft passes, the graph's facts are shown as they are - never the docs or web."""
+    if found := knowledge.lookup(question):
+        progress.report("🧠 Answered from your project's knowledge graph")
+        text, paths = found
+        return Result(question, "project", text, paths or ["all apps"])
+    evidence, paths = knowledge.project_evidence(question)
+    if not evidence:
+        return None
+    progress.report("🧠 Looking at your project's knowledge graph...")
+    answer, _ = await draft_and_verify(
+        question,
+        evidence,
+        lambda fb: file_chain.ainvoke(
+            {"evidence": evidence, "question": question, "feedback": f"\n\n{fb}" if fb else ""}
+        ),
+    )
+    if not answer:
+        answer = prompts.PROJECT_FACTS + "\n".join(f"- {line}" for line in evidence.splitlines())
+    return Result(question, "project", answer, paths)
+
+
+async def search_question(session: memory.Session, question: str) -> Result:
     # 1. The HYPER-AI documentation.
     progress.report("🔎 Searching the HYPER-AI documentation...")
     docs = await rag.retrieve(session, question)
@@ -194,7 +250,7 @@ async def answer_from_files(question: str, evidence: str, paths: list[str]) -> R
     return Result(question, "file", answer, paths) if answer else None
 
 
-async def btw_worker(question: str) -> Result:
+async def search_btw(question: str) -> Result:
     """/btw: the documentation and the workspace files the question names, then the web.
 
     A question that names a file exactly ("what image does x.yaml use?") reads the

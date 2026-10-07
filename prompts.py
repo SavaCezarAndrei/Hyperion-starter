@@ -35,6 +35,12 @@ BTW_FILE_INSTRUCTIONS = (
 )
 FROM_FILES = "From your workspace file(s) {files}:\n\n"
 
+# Project knowledge graph (knowledge.py).
+KNOWLEDGE_REUSED = "🧠 I've answered this before - reusing the verified answer"
+FROM_PROJECT = "From your project's knowledge graph ({files}):\n\n"
+PROJECT_FACTS = "I couldn't word a verified answer, so here is what your project contains:\n"
+GRAPH_COMMAND = "/graph"
+
 RAG_INSTRUCTIONS = (
     "Answer the question using ONLY the context from the HYPER-AI documents that "
     "comes with it. If the context does not contain the answer, reply with exactly "
@@ -153,6 +159,9 @@ Rules:
 - request: everything the file must contain or the change to make, with all details the
   user gave (image, ports, memory, cpu, names...). Do not invent details.
 - At most 4 tasks.
+- Workspace files are listed with what they contain ("path: app, image, ports"). When
+  the user names an app or an image instead of a file, use that file's path (the part
+  before the colon).
 
 Workspace files: {files}
 

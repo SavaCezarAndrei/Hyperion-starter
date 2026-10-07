@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import time
+from contextlib import asynccontextmanager
 
 import openai
 from fastapi import FastAPI
@@ -10,6 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import agent
+import knowledge
 import memory
 import progress
 import prompts
@@ -32,7 +34,17 @@ MAX_TEXT_CHARS = 4000  # longer messages would crowd the model's 8192-token cont
 if not API_KEY:
     log.error("API_KEY is not set: pass it with `docker run -e API_KEY=...` or in .env")
 
-app = FastAPI(title="Hyperion Agent")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # The project knowledge graph: loaded from Redis, or created for a new project.
+    # In the background: the agent must answer /health while the workspace is read.
+    loading = asyncio.create_task(knowledge.load())
+    yield
+    loading.cancel()
+
+
+app = FastAPI(title="Hyperion Agent", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,6 +92,8 @@ async def generate_reply(request: ChatRequest):
         yield "data: [DONE]\n\n"
         return
     session = await memory.get(request.user_id)
+    if not session.messages:  # a new chat session: refresh the project knowledge graph
+        knowledge.on_new_session()
     reply: list[str] = []  # what goes into memory: answers, not progress lines
     channel = progress.open_channel()
     done = object()
@@ -116,6 +130,8 @@ async def generate_reply(request: ChatRequest):
                 shown_status = True
                 yield sse({"response": prompts.STATUS_LINE.format(step=event["status"])})
                 continue
+            if "action" in event:  # keep the knowledge graph in step with the workspace
+                await knowledge.apply(event)
             if "response" in event:
                 reply.append(event["response"])
                 if shown_status:  # a blank line between the progress lines and the answer
@@ -124,7 +140,7 @@ async def generate_reply(request: ChatRequest):
             yield sse(event)
     finally:
         worker.cancel()  # e.g. the user closed the IDE mid-reply
-    if not agent.is_side_question(request.text):  # /btw stays off the record
+    if not agent.off_the_record(request.text):  # /btw and /graph are not stored
         memory.add_turn(session, request.text, "".join(reply))
         await memory.save(session)
     log.info("replied in %.1fs to %r", time.perf_counter() - started, request.text[:80])
@@ -145,6 +161,12 @@ async def health():
         "rag_chunks": len(rag.retriever.documents) if rag.retriever else 0,
         "memory": "redis" if memory.REDIS_URL else "in-process",
     }
+
+
+@app.get("/graph")
+async def graph():
+    """The project knowledge graph: nodes, edges and what it has learned."""
+    return knowledge.graph()
 
 
 if __name__ == "__main__":

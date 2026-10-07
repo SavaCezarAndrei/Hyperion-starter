@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from langchain_core.messages import HumanMessage, SystemMessage
 
 import confirm
+import knowledge
 import memory
 import orchestrator
 import progress
@@ -31,6 +32,11 @@ def is_side_question(text: str) -> bool:
     return text.strip().lower().startswith(BTW)
 
 
+def off_the_record(text: str) -> bool:
+    """Messages main.py does not store in the session: /btw and /graph."""
+    return is_side_question(text) or text.strip().lower() == prompts.GRAPH_COMMAND
+
+
 async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
     if is_side_question(text):
         async for event in side_answer(session, text.strip()[len(BTW) :].strip()):
@@ -42,6 +48,10 @@ async def handle(session: memory.Session, text: str) -> AsyncIterator[Event]:
         yield {"response": "Creating the folder `hyperion-test`…"}
         yield {"action": "create_folder", "path": "hyperion-test"}
         yield {"response": " Done — check the file explorer."}
+        return
+
+    if text.strip().lower() == prompts.GRAPH_COMMAND:
+        yield {"response": knowledge.overview()}
         return
 
     # A change is waiting for yes/no: decided in code, before the router.
