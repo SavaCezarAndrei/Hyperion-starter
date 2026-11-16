@@ -126,3 +126,4 @@ Keep in mind: the IDE frontend calls your service straight from the browser, so 
 ## License
 
 [Apache 2.0](LICENCE)
+[LICENSE-GPL](LICENSE-GPL)
