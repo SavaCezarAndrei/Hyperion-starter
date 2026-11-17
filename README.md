@@ -202,7 +202,7 @@ The IDE frontend calls the service straight from the browser, so the CORS middle
 |---|---|
 | **Bogdan Valentin Floricescu** | Coordinator. Applied electronics engineer and PhD researcher |
 | **Sava Cezar-Andrei** | Second-year computer engineering student |
-| **Roman Stefania-Alexandra** | Third-year computer engineering student |
+| **Roman Ștefania-Alexandra** | Third-year computer engineering student |
 
 ## License
 
